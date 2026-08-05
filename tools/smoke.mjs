@@ -93,6 +93,43 @@ const POINTER = `
     window.dispatchEvent(new KeyboardEvent('keyup', { key: k }));
   };
 `;
+
+// Local mirror of game.launcherVoids/isEdge. An empty neighbour only exposes an
+// orb when that empty space is connected to the launcher below the board;
+// sealed holes do not count as firing lanes.
+const REACHABLE_EDGE = `
+  const auditRowCols = r => ((r + G.parity) & 1) ? 11 : 12;
+  const auditOffsets = r => ((r + G.parity) & 1)
+    ? [[0,-1],[0,1],[-1,0],[-1,1],[1,0],[1,1]]
+    : [[0,-1],[0,1],[-1,-1],[-1,0],[1,-1],[1,0]];
+  const launcherOpen = () => {
+    const bottom = G.grid.length, seen = new Set(), q = [];
+    for (let c = 0; c < auditRowCols(bottom); c++) {
+      seen.add(bottom + ',' + c); q.push([bottom, c]);
+    }
+    while (q.length) {
+      const [r, c] = q.pop();
+      for (const [dr, dc] of auditOffsets(r)) {
+        const rr = r + dr, cc = c + dc;
+        if (rr < 0 || rr > bottom || cc < 0 || cc >= auditRowCols(rr)) continue;
+        if (rr < bottom && G.grid[rr][cc]) continue;
+        const k = rr + ',' + cc;
+        if (seen.has(k)) continue;
+        seen.add(k); q.push([rr, cc]);
+      }
+    }
+    return seen;
+  };
+  const isReachableEdge = (r, c, open) => {
+    for (const [dr, dc] of auditOffsets(r)) {
+      const rr = r + dr, cc = c + dc;
+      if (rr < 0 || rr > G.grid.length || cc < 0 || cc >= auditRowCols(rr)) continue;
+      if (rr < G.grid.length && G.grid[rr][cc]) continue;
+      if (open.has(rr + ',' + cc)) return true;
+    }
+    return false;
+  };
+`;
 // Runs inside the page: fires shots at random angles and audits invariants
 // after every landing.
 const AUTOPLAY = shots => `(() => {
@@ -101,6 +138,7 @@ const AUTOPLAY = shots => `(() => {
   window.addEventListener('error', e => errs.push(e.message));
 
   ${POINTER}
+  ${REACHABLE_EDGE}
   const aim = () => {
     const a = -Math.PI / 2 + (Math.random() - 0.5) * 2.3;
     aimAt(640 + Math.cos(a) * 400, 656 + Math.sin(a) * 400);
@@ -117,6 +155,7 @@ const AUTOPLAY = shots => `(() => {
   const audit = () => {
     let orbs = 0, enclosed = 0;
     const occupied = new Set();
+    const open = launcherOpen();
     for (let r = 0; r < G.grid.length; r++) {
       for (let c = 0; c < G.grid[r].length; c++) {
         const b = G.grid[r][c];
@@ -133,7 +172,7 @@ const AUTOPLAY = shots => `(() => {
         // a cell index must be inside its row's parity-derived width
         const width = ((r + G.parity) & 1) ? 11 : 12;
         if (G.grid[r].length !== width || c >= width) st.outOfRange++;
-        if (!isEdge(r, c)) enclosed++;
+        if (!isReachableEdge(r, c, open)) enclosed++;
       }
     }
     if (orbs > st.maxOrbs) st.maxOrbs = orbs;
@@ -152,12 +191,13 @@ const AUTOPLAY = shots => `(() => {
       // the chambered value must be present on an exposed edge
       if (G.grid.some(row => row.some(Boolean))) {
         const edgeVals = new Set(), allVals = new Set();
+        const open = launcherOpen();
         for (let r = 0; r < G.grid.length; r++)
           for (let c = 0; c < G.grid[r].length; c++) {
             const b = G.grid[r][c];
             if (!b) continue;
             allVals.add(b.v);
-            if (isEdge(r, c)) edgeVals.add(b.v);
+            if (isReachableEdge(r, c, open)) edgeVals.add(b.v);
           }
         // The cannon only promises usable ammo while entropy is 0; past that
         // duds are the mechanic, so only police the guarantee at wave 1.
@@ -182,22 +222,6 @@ const AUTOPLAY = shots => `(() => {
     if (G.bytes > st.ffBurned) st.ffBurned = G.bytes;
   }
 
-  // local mirror of game.isEdge so the audit does not need it exported
-  function isEdge(r, c) {
-    const odd = (r + G.parity) & 1;
-    const o = odd
-      ? [[0,-1],[0,1],[-1,0],[-1,1],[1,0],[1,1]]
-      : [[0,-1],[0,1],[-1,-1],[-1,0],[1,-1],[1,0]];
-    for (const [dr, dc] of o) {
-      const rr = r + dr, cc = c + dc;
-      if (rr < 0) continue;
-      if (rr >= G.grid.length) return true;
-      if (cc < 0 || cc >= G.grid[rr].length) continue;
-      if (!G.grid[rr][cc]) return true;
-    }
-    return false;
-  }
-
   return Object.assign(st, {
     errors: errs,
     score: G.score, level: G.level, merges: G.merges,
@@ -214,7 +238,8 @@ const CLEAR_SCENARIO = `(() => {
   const S = window.SPACESCIENCE, G = S.G;
   ${POINTER}
   G.state = 'play'; G.parity = 0; G.ball = null;
-  G.shots = 0; G.pendingPush = false; G.pushAnim = 0; G.clearAnim = 0;
+  G.shots = 0; G.bufferLeft = G.shotsPerRow;
+  G.pendingPush = false; G.pushAnim = 0; G.clearAnim = 0;
   const startLevel = G.level, startBytes = G.bytes;
   G.grid = [new Array(12).fill(null)];
   G.grid[0][5] = { v: 0x80, pop: 1, born: 0 };
@@ -240,23 +265,22 @@ const CLEAR_SCENARIO = `(() => {
   };
 })()`;
 
-// Regression for the merge rule: a touching group of four 02s must collapse
-// PAIRWISE into two 04s -- not one 10 (doubling per extra orb) and not a single
-// 04. The landing cell is on the ceiling row so nothing drops as a floater.
+// Regression for the merge rule: this compact group forces both products onto
+// adjacent ceiling cells. They are siblings from one pairwise collapse and must
+// remain two 04s rather than immediately consuming each other into an 08.
 const MERGE_SCENARIO = `(() => {
   const S = window.SPACESCIENCE, G = S.G;
   ${POINTER}
   G.state = 'play'; G.parity = 0; G.ball = null;
-  G.shots = 0; G.pendingPush = false; G.pushAnim = 0;
-  // All three sit on the ceiling row, clear of the flight path, so the shot
-  // can only land in the gap at col 5 and the fused orb stays anchored.
-  G.grid = [new Array(12).fill(null)];
-  G.grid[0][3] = { v: 2, pop: 1, born: 0 };
-  G.grid[0][4] = { v: 2, pop: 1, born: 0 };
+  G.shots = 0; G.bufferLeft = G.shotsPerRow;
+  G.pendingPush = false; G.pushAnim = 0;
+  G.grid = [new Array(12).fill(null), new Array(11).fill(null)];
+  G.grid[0][5] = { v: 2, pop: 1, born: 0 };
   G.grid[0][6] = { v: 2, pop: 1, born: 0 };
+  G.grid[1][4] = { v: 2, pop: 1, born: 0 };
   G.cur = 2; G.next = [2, 2];
 
-  aimAt(616, 60);                 // straight up into the gap at row 0, col 5
+  aimAt(640, 60);                 // lands at row 1, col 5 under the pair
   key(' ');
   for (let i = 0; i < 400 && G.ball; i++) S.step();
   for (let i = 0; i < 5; i++) S.step();
@@ -273,6 +297,7 @@ const MERGE_SCENARIO = `(() => {
 const DUD_SCENARIO = `(() => {
   const S = window.SPACESCIENCE, G = S.G;
   ${POINTER}
+  ${REACHABLE_EDGE}
   const aim = () => {
     const a = -Math.PI / 2 + (Math.random() - 0.5) * 2.3;
     aimAt(640 + Math.cos(a) * 400, 656 + Math.sin(a) * 400);
@@ -281,24 +306,11 @@ const DUD_SCENARIO = `(() => {
   // the probe re-enters a deep wave every time the board resets.
   const deepen = () => { G.level = 11; S.nextWave(); };
   deepen();
-  const isEdge = (r, c) => {
-    const odd = (r + G.parity) & 1;
-    const o = odd ? [[0,-1],[0,1],[-1,0],[-1,1],[1,0],[1,1]]
-                  : [[0,-1],[0,1],[-1,-1],[-1,0],[1,-1],[1,0]];
-    for (const [dr, dc] of o) {
-      const rr = r + dr, cc = c + dc;
-      if (rr < 0) continue;
-      if (rr >= G.grid.length) return true;
-      if (cc < 0 || cc >= G.grid[rr].length) continue;
-      if (!G.grid[rr][cc]) return true;
-    }
-    return false;
-  };
   const edgeSet = () => {
-    const m = new Set();
+    const m = new Set(), open = launcherOpen();
     for (let r = 0; r < G.grid.length; r++)
       for (let c = 0; c < G.grid[r].length; c++)
-        if (G.grid[r][c] && isEdge(r, c)) m.add(G.grid[r][c].v);
+        if (G.grid[r][c] && isReachableEdge(r, c, open)) m.add(G.grid[r][c].v);
     return m;
   };
   let checks = 0, duds = 0, odd = 0;
@@ -361,7 +373,8 @@ const CEILING_SCENARIO = `(() => {
   const S = window.SPACESCIENCE, G = S.G;
   ${POINTER}
   G.state = 'play'; G.parity = 0; G.ball = null;
-  G.shots = 0; G.pendingPush = false; G.pushAnim = 0;
+  G.shots = 0; G.bufferLeft = G.shotsPerRow;
+  G.pendingPush = false; G.pushAnim = 0;
   G.grid = [new Array(12).fill(null), new Array(11).fill(null)];
   G.grid[0][5] = { v: 4, pop: 1, born: 0 };
   G.cur = 4; G.next = [4, 4];
@@ -390,7 +403,8 @@ const TAIL_SCENARIO = `(() => {
   const S = window.SPACESCIENCE, G = S.G;
   ${POINTER}
   G.state = 'play'; G.parity = 0; G.ball = null;
-  G.shots = 0; G.pendingPush = false; G.pushAnim = 0;
+  G.shots = 0; G.bufferLeft = G.shotsPerRow;
+  G.pendingPush = false; G.pushAnim = 0;
   G.grid = [new Array(12).fill(null), new Array(11).fill(null),
             new Array(12).fill(null), new Array(11).fill(null)];
   G.grid[0][5] = { v: 2, pop: 1, born: 0 };     // backstop / anchor
@@ -420,7 +434,8 @@ const BLAST_SCENARIO = `(() => {
   const S = window.SPACESCIENCE, G = S.G;
   ${POINTER}
   G.state = 'play'; G.parity = 0; G.ball = null;
-  G.shots = 0; G.pendingPush = false; G.pushAnim = 0;
+  G.shots = 0; G.bufferLeft = G.shotsPerRow;
+  G.pendingPush = false; G.pushAnim = 0;
   G.grid = [new Array(12).fill(null), new Array(11).fill(null)];
   G.grid[0][5] = { v: 0x80, pop: 1, born: 0 };  // pairs with the shot -> FF
   G.grid[0][6] = { v: 2, pop: 1, born: 0 };     // touching: should be blasted
@@ -447,7 +462,8 @@ const ODD_SCENARIO = `(() => {
   const S = window.SPACESCIENCE, G = S.G;
   ${POINTER}
   G.state = 'play'; G.parity = 0; G.ball = null;
-  G.shots = 0; G.pendingPush = false; G.pushAnim = 0;
+  G.shots = 0; G.bufferLeft = G.shotsPerRow;
+  G.pendingPush = false; G.pushAnim = 0;
   G.grid = [new Array(12).fill(null)];
   G.grid[0][4] = { v: 4, pop: 1, born: 0 };
   G.grid[0][6] = { v: 4, pop: 1, born: 0 };
@@ -505,6 +521,375 @@ const RESUME_SCENARIO = `(() => {
   };
 })()`;
 
+// An FF blast removes the only anchor above two tail cells. They drop on the
+// same shot that made the inbound buffer due, buying two shots per dropped cell
+// and cancelling that pending row.
+const DROP_BUFFER_SCENARIO = `(() => {
+  const S = window.SPACESCIENCE, G = S.G;
+  ${POINTER}
+  G.state = 'play'; G.hyper = false; G.parity = 0; G.ball = null;
+  G.level = 1; G.shotsPerRow = 8; G.shots = 0; G.bufferLeft = 1;
+  G.pendingPush = false; G.pushAnim = 0;
+  G.grid = [new Array(12).fill(null), new Array(11).fill(null),
+            new Array(12).fill(null), new Array(11).fill(null)];
+  G.grid[0][5] = { v: 0x80, pop: 1, born: 0 };  // overflows with the shot
+  G.grid[0][10] = { v: 2, pop: 1, born: 0 };    // keeps the board non-empty
+  G.grid[1][4] = { v: 0x10, pop: 1, born: 0 };  // blasted anchor
+  G.grid[2][4] = { v: 0x20, pop: 1, born: 0 };  // DROP 1
+  G.grid[3][4] = { v: 0x40, pop: 1, born: 0 };  // DROP 2
+  G.cur = 0x80; G.next = [2, 2];
+
+  aimAt(640, 100); key(' ');
+  for (let i = 0; i < 500 && G.ball; i++) S.step();
+  for (let i = 0; i < 8; i++) S.step();
+  const cells = [];
+  for (let r = 0; r < G.grid.length; r++)
+    for (let c = 0; c < G.grid[r].length; c++)
+      if (G.grid[r][c]) cells.push({ r, c, v: G.grid[r][c].v });
+  return { bufferLeft: G.bufferLeft, pendingPush: G.pendingPush,
+           parity: G.parity, pushAnim: G.pushAnim, cells, state: G.state };
+})()`;
+
+// A warp-created overflow is a SUPER FF: it removes the occupied support route
+// from the burn site to row zero. The same board fired with an ordinary 80 only
+// gets the normal one-ring blast, making the distinction deterministic.
+const SUPER_FF_SCENARIO = `(() => {
+  const S = window.SPACESCIENCE, G = S.G;
+  ${POINTER}
+  const run = (warp, startBuffer = 8) => {
+    G.state = 'play'; G.hyper = false; G.parity = 0; G.ball = null;
+    G.level = 1; G.shotsPerRow = 8; G.shots = 0; G.bufferLeft = startBuffer;
+    G.pendingPush = false; G.pushAnim = 0; G.clearAnim = 0;
+    G.score = 0; G.merges = 0; G.bytes = 0; G.maxTile = 2;
+    G.lastBonus = 0; G.charge = warp ? 1 : 0; G.warpReady = warp;
+    G.grid = [new Array(12).fill(null), new Array(11).fill(null),
+              new Array(12).fill(null), new Array(11).fill(null),
+              new Array(12).fill(null)];
+    // A three-orb support stem leads from the 80 target to the ceiling.
+    G.grid[0][5] = { v: 2, pop: 1, born: 0 };
+    G.grid[1][5] = { v: 4, pop: 1, born: 0 };
+    G.grid[2][5] = { v: 8, pop: 1, born: 0 };
+    G.grid[3][5] = { v: 0x80, pop: 1, born: 0 };
+    G.cur = 0x80; G.next = [2, 2];
+
+    aimAt(640, 60);
+    if (warp) window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift' }));
+    key(' ');
+    if (warp) window.dispatchEvent(new KeyboardEvent('keyup', { key: 'Shift' }));
+    for (let i = 0; i < 500 && G.ball; i++) S.step();
+
+    const cells = [];
+    for (let r = 0; r < G.grid.length; r++)
+      for (let c = 0; c < G.grid[r].length; c++)
+        if (G.grid[r][c]) cells.push({ r, c, v: G.grid[r][c].v });
+    return { state: G.state, cells, bufferLeft: G.bufferLeft, score: G.score,
+             actionScore: G.score - (G.state === 'clear' ? G.lastBonus : 0),
+             bonus: G.lastBonus, bytes: G.bytes };
+  };
+  return { ordinary: run(false), warp: run(true), capped: run(true, 31) };
+})()`;
+
+// Starting a run must write its initial board immediately, and a readable but
+// malformed same-version payload must fail closed rather than throwing.
+const SAVE_GUARD_SCENARIO = `(() => {
+  const S = window.SPACESCIENCE, G = S.G;
+  localStorage.removeItem('spacescience.save');
+  S.newGame();
+  const immediate = S.resumeAvailable();
+  const initialCells = G.grid.reduce((n, row) => n + row.filter(Boolean).length, 0);
+
+  const valid = JSON.parse(localStorage.getItem('spacescience.save'));
+  const malformed = structuredClone(valid);
+  delete malformed.next;
+  localStorage.setItem('spacescience.save', JSON.stringify(malformed));
+  let threw = false, available = null, resumed = null;
+  try { available = S.resumeAvailable(); resumed = S.resumeGame(); }
+  catch (e) { threw = true; }
+
+  const rejectedBuffers = [];
+  for (const bad of [null, '99']) {
+    const malformedBuffer = structuredClone(valid);
+    malformedBuffer.bufferLeft = bad;
+    localStorage.setItem('spacescience.save', JSON.stringify(malformedBuffer));
+    rejectedBuffers.push(S.resumeAvailable());
+  }
+
+  const legacy = structuredClone(valid);
+  legacy.score = 321;
+  legacy.grid = legacy.grid.map(row => row.map(() => 0));
+  legacy.grid[0][0] = 2;                 // legitimate ceiling anchor
+  legacy.grid[3][legacy.grid[3].length - 1] = 4; // disconnected legacy artifact
+  localStorage.setItem('spacescience.save', JSON.stringify(legacy));
+  const repairedOk = S.resumeGame();
+  const repaired = { score: G.score,
+    values: G.grid.flatMap(row => row.filter(Boolean).map(b => b.v)) };
+
+  const artifactOnly = structuredClone(valid);
+  artifactOnly.score = 654;
+  artifactOnly.grid = artifactOnly.grid.map(row => row.map(() => 0));
+  artifactOnly.grid[3][artifactOnly.grid[3].length - 1] = 4;
+  localStorage.setItem('spacescience.save', JSON.stringify(artifactOnly));
+  const artifactOk = S.resumeGame();
+  const artifactResult = { score: G.score, level: G.level,
+    cells: G.grid.reduce((n, row) => n + row.filter(Boolean).length, 0) };
+
+  const overCap = structuredClone(valid);
+  overCap.bufferLeft = 99;
+  localStorage.setItem('spacescience.save', JSON.stringify(overCap));
+  const capResume = S.resumeGame(), cappedBuffer = G.bufferLeft;
+
+  return { immediate, initialCells,
+           malformed: { threw, available, resumed, rejectedBuffers },
+           repairedOk, repaired, artifactOk, artifactResult,
+           artifactLevel: artifactOnly.level, capResume, cappedBuffer };
+})()`;
+
+// Closing during BOARD CLEAR should retain the awarded score and consume the
+// clear marker by loading the following wave on resume.
+const CLEAR_RESUME_SCENARIO = `(() => {
+  const S = window.SPACESCIENCE, G = S.G;
+  ${POINTER}
+  S.newGame();
+  const startScore = 1234, startLevel = G.level;
+  G.score = startScore; G.parity = 0; G.ball = null;
+  G.shots = 0; G.bufferLeft = G.shotsPerRow;
+  G.pendingPush = false; G.pushAnim = 0; G.clearAnim = 0;
+  G.grid = [new Array(12).fill(null)];
+  G.grid[0][5] = { v: 0x80, pop: 1, born: 0 };
+  G.cur = 0x80; G.next = [2, 2];
+  aimAt(640, 100); key(' ');
+  for (let i = 0; i < 500 && G.state !== 'clear'; i++) S.step();
+
+  const cleared = { state: G.state, score: G.score, bonus: G.lastBonus,
+                    earned: G.score - startScore, level: G.level,
+                    available: S.resumeAvailable() };
+  G.grid = []; G.score = 0; G.level = 99; G.lastBonus = 0;
+  let threw = false, ok = false;
+  try { ok = S.resumeGame(); } catch (e) { threw = true; }
+  const cells = G.grid.reduce((n, row) => n + row.filter(Boolean).length, 0);
+  return { cleared, threw, ok, state: G.state, score: G.score,
+           level: G.level, cells, expectedLevel: startLevel + 1 };
+})()`;
+
+// A save is an atomic settled-board checkpoint. Toggling Hyper while a shot is
+// flying must not persist the consumed ammo/countdown without the unrepresented
+// ball, while settled pause and BOARD CLEAR toggles should survive a reload.
+const HYPER_SAVE_SCENARIO = `(() => {
+  const S = window.SPACESCIENCE, G = S.G;
+  ${POINTER}
+  const code = () => {
+    for (const k of ['ArrowUp','ArrowUp','ArrowDown','ArrowDown',
+                     'ArrowLeft','ArrowRight','ArrowLeft','ArrowRight']) key(k);
+  };
+  const raw = () => localStorage.getItem('spacescience.save');
+  const saved = () => JSON.parse(raw());
+
+  S.newGame();
+  const beforeRaw = raw(), before = saved();
+  aimAt(760, 100); key(' ');
+  const launched = { ball: !!G.ball, shots: G.shots, bufferLeft: G.bufferLeft };
+  code();
+  const duringRaw = raw();
+  const liveHyper = G.hyper;
+  const flightResume = S.resumeGame();
+  const afterFlight = { hyper: G.hyper, ball: !!G.ball, shots: G.shots,
+                        bufferLeft: G.bufferLeft,
+                        grid: JSON.stringify(G.grid.map(row => row.map(b => b ? b.v : 0))) };
+
+  S.newGame();
+  G.state = 'pause';
+  code();
+  const paused = saved();
+  const pauseResume = S.resumeGame();
+  const afterPause = { hyper: G.hyper, state: G.state };
+
+  S.newGame();
+  const clearLevel = G.level;
+  G.grid = []; G.ball = null; G.state = 'clear'; G.clearAnim = 1;
+  code();
+  const cleared = saved(), clearAvailable = S.resumeAvailable();
+  const clearResume = S.resumeGame();
+  const afterClear = { hyper: G.hyper, state: G.state, level: G.level,
+                       shotsPerRow: G.shotsPerRow, cells: G.grid.reduce(
+                         (n, row) => n + row.filter(Boolean).length, 0) };
+
+  return {
+    before, sameDuringFlight: beforeRaw === duringRaw, launched, liveHyper,
+    flightResume, afterFlight,
+    expectedGrid: JSON.stringify(before.grid),
+    paused, pauseResume, afterPause,
+    cleared, clearAvailable, clearResume, afterClear,
+    expectedClearLevel: clearLevel + 1
+  };
+})()`;
+
+// Input transitions are gesture-sized: a touch used to leave the title cannot
+// leak through and fire, a repeated Space cannot pay for coin and launch, and R
+// on the title replaces a held run with a fresh save.
+const INPUT_SCENARIO = `(() => {
+  const S = window.SPACESCIENCE, G = S.G;
+  const press = (key, repeat = false) =>
+    window.dispatchEvent(new KeyboardEvent('keydown', { key, repeat }));
+  const touch = (type, touches) => {
+    const e = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(e, 'touches', { value: touches });
+    window.dispatchEvent(e);
+  };
+
+  localStorage.removeItem('spacescience.save');
+  G.state = 'title'; G.coin = true; G.ball = null; G.shots = 0;
+  touch('touchstart', [{ clientX: 640, clientY: 360 }]);
+  touch('touchend', []);
+  const touchResult = { state: G.state, shots: G.shots, ball: !!G.ball };
+
+  localStorage.removeItem('spacescience.save');
+  G.state = 'title'; G.coin = false; G.ball = null;
+  press(' ');
+  const afterCoin = { state: G.state, coin: G.coin };
+  press(' ', true);
+  const afterRepeat = { state: G.state, ball: !!G.ball };
+
+  S.newGame();
+  const held = JSON.parse(localStorage.getItem('spacescience.save'));
+  held.score = 777;
+  localStorage.setItem('spacescience.save', JSON.stringify(held));
+  G.state = 'title'; G.coin = false;
+  const beforeR = S.resumeAvailable();
+  press('R');
+  const afterR = S.resumeAvailable();
+  const helpBefore = G.state;
+  press('H');
+  const helpOpen = { state: G.state, returnState: G.helpState, page: G.helpPage };
+  press('ArrowRight');
+  const helpPage = G.helpPage;
+  press('Escape');
+  const helpClosed = { state: G.state, returnState: G.helpState };
+  return { touchResult, afterCoin, afterRepeat, beforeR, afterR,
+           rState: helpBefore, rCoin: G.coin, helpOpen, helpPage, helpClosed };
+})()`;
+
+// Exercise multiple generators/entropy levels and independently prove every
+// generated cell is connected to at least one occupied ceiling cell.
+const GENERATED_CONNECTIVITY_SCENARIO = `(() => {
+  const S = window.SPACESCIENCE, G = S.G;
+  const offsets = r => ((r + G.parity) & 1)
+    ? [[0,-1],[0,1],[-1,0],[-1,1],[1,0],[1,1]]
+    : [[0,-1],[0,1],[-1,-1],[-1,0],[1,-1],[1,0]];
+  const detached = [];
+  let boards = 0, empty = 0;
+  const audit = label => {
+    boards++;
+    const seen = new Set(), q = [];
+    for (let c = 0; c < (G.grid[0] || []).length; c++) if (G.grid[0][c]) {
+      seen.add('0,' + c); q.push([0, c]);
+    }
+    while (q.length) {
+      const [r, c] = q.pop();
+      for (const [dr, dc] of offsets(r)) {
+        const rr = r + dr, cc = c + dc, k = rr + ',' + cc;
+        if (rr < 0 || rr >= G.grid.length || cc < 0 || cc >= G.grid[rr].length ||
+            !G.grid[rr][cc] || seen.has(k)) continue;
+        seen.add(k); q.push([rr, cc]);
+      }
+    }
+    let cells = 0;
+    for (let r = 0; r < G.grid.length; r++)
+      for (let c = 0; c < G.grid[r].length; c++) if (G.grid[r][c]) {
+        cells++;
+        if (!seen.has(r + ',' + c)) detached.push(label + ':' + r + ',' + c);
+      }
+    if (!cells) empty++;
+  };
+  for (let seed = 1; seed <= 12; seed++) {
+    S.setSeed(seed * 104729); S.newGame(); audit(seed + '/1');
+    for (const level of [4, 8, 12]) {
+      G.level = level - 1; S.nextWave(); audit(seed + '/' + level);
+    }
+  }
+  return { boards, empty, detached: detached.slice(0, 20), count: detached.length };
+})()`;
+
+// Seed 75's first wave contains a sealed pocket. Prove that the ammo picker
+// treats only launcher-connected empty space as exposure: cells bordering the
+// pocket are false edges under the old local-hole rule, while the chambered
+// byte still comes from a genuinely reachable edge.
+const SEALED_CAVITY_SCENARIO = `(() => {
+  const S = window.SPACESCIENCE, G = S.G;
+  ${REACHABLE_EDGE}
+  S.setSeed(75); S.newGame();
+  const open = launcherOpen(), edgeValues = new Set();
+  let sealedVoids = 0, falseEdges = 0;
+  for (let r = 0; r < G.grid.length; r++) {
+    for (let c = 0; c < G.grid[r].length; c++) {
+      const b = G.grid[r][c], key = r + ',' + c;
+      if (!b) {
+        if (!open.has(key)) sealedVoids++;
+        continue;
+      }
+      if (isReachableEdge(r, c, open)) {
+        edgeValues.add(b.v);
+        continue;
+      }
+      // This is exactly the old predicate: any in-bounds empty neighbour.
+      if (auditOffsets(r).some(([dr, dc]) => {
+        const rr = r + dr, cc = c + dc;
+        return rr >= 0 && rr < G.grid.length && cc >= 0 &&
+          cc < auditRowCols(rr) && !G.grid[rr][cc];
+      })) falseEdges++;
+    }
+  }
+  return { sealedVoids, falseEdges, cur: G.cur,
+           curReachable: edgeValues.has(G.cur), edgeValues: [...edgeValues] };
+})()`;
+
+// The renderer's ghost cell must be a property of the real projectile path,
+// not a second approximate simulation. Sweep the complete legal aim range,
+// alternate both lattice parities, and compare trace() with the cell that the
+// live shot actually occupies. Calling trace() must itself be read-only.
+const AIM_GUIDE_SCENARIO = `(() => {
+  const S = window.SPACESCIENCE, G = S.G;
+  ${POINTER}
+  const failures = [];
+  let mutations = 0, maxBounces = 0, directMatched = false;
+  const parityChecks = [0, 0];
+  const lo = -Math.PI + 0.26, hi = -0.26;
+
+  for (let i = 0; i < 41; i++) {
+    const parity = i & 1;
+    // This near-limit angle was a concrete coarse-trace failure: the old
+    // vx*.5 preview chose (0,9), while five-substep live motion chose (0,8).
+    const angle = i === 2 ? -2.871106 : lo + (hi - lo) * i / 40;
+    G.parity = parity;
+    G.grid = [new Array(parity ? 11 : 12).fill(null)];
+    G.grid[0][5] = { v: 2, pop: 1, born: 0 };
+    G.state = 'play'; G.ball = null; G.angle = angle;
+    G.shots = 0; G.bufferLeft = 32; G.pendingPush = false;
+    G.pushAnim = 0; G.clearAnim = 0; G.over = 0;
+    G.cur = 0xFE; G.next = [2, 4]; G.warpReady = false;
+
+    const before = JSON.stringify(G);
+    const predicted = S.trace();
+    if (JSON.stringify(G) !== before) mutations++;
+    maxBounces = Math.max(maxBounces, Math.max(0, predicted.pts.length - 2));
+
+    key(' ');
+    let steps = 0;
+    while (G.ball && steps++ < 500) S.step();
+    let actual = null;
+    for (let r = 0; r < G.grid.length; r++)
+      for (let c = 0; c < G.grid[r].length; c++)
+        if (G.grid[r][c]?.v === 0xFE) actual = [r, c];
+
+    const match = !!predicted.cell && !!actual &&
+      predicted.cell[0] === actual[0] && predicted.cell[1] === actual[1];
+    parityChecks[parity]++;
+    if (i === 20) directMatched = match;
+    if (!match) failures.push({ i, parity, angle, predicted: predicted.cell, actual, steps });
+  }
+  return { checks: 41, mutations, maxBounces, directMatched, parityChecks,
+           failures: failures.slice(0, 8), mismatchCount: failures.length };
+})()`;
+
 /* ------------------------------------------------------------------ main  */
 async function main() {
   if (!fs.existsSync(path.join(ROOT, 'dist', 'index.html'))) {
@@ -552,6 +937,15 @@ async function main() {
     const od = await evaluate(send, ODD_SCENARIO);
     const bl = await evaluate(send, BLAST_SCENARIO);
     const rs = await evaluate(send, RESUME_SCENARIO);
+    const db = await evaluate(send, DROP_BUFFER_SCENARIO);
+    const sf = await evaluate(send, SUPER_FF_SCENARIO);
+    const sg = await evaluate(send, SAVE_GUARD_SCENARIO);
+    const cr = await evaluate(send, CLEAR_RESUME_SCENARIO);
+    const hs = await evaluate(send, HYPER_SAVE_SCENARIO);
+    const ip = await evaluate(send, INPUT_SCENARIO);
+    const gc = await evaluate(send, GENERATED_CONNECTIVITY_SCENARIO);
+    const sc = await evaluate(send, SEALED_CAVITY_SCENARIO);
+    const ag = await evaluate(send, AIM_GUIDE_SCENARIO);
 
     const checks = [
       ['no runtime errors', r.errors.length === 0, r.errors.join(' | ')],
@@ -562,10 +956,15 @@ async function main() {
       ['wave-1 ammo always matches an edge', r.ammoViolations === 0,
         `${r.ammoViolations}/${r.guaranteeChecks} violations`],
       ['no cells outside their row width', r.outOfRange === 0, `${r.outOfRange}`],
-      ['fusions actually happen', r.merges > 0, `${r.merges}`],
-      ['the ladder actually climbs', r.topByte !== '1', `top byte ${r.topByte}`],
-      ['a group of 4 collapses pairwise to 2', mg.count === 2, JSON.stringify(mg)],
-      ['and both are exactly one tier up', mg.values.every(v => v === 4), JSON.stringify(mg)],
+      // Screenshot runs intentionally stop at 80 shots; random aim can miss
+      // every natural match that early. The deterministic merge scenarios
+      // below cover the rule, while the full 500-shot gate must exercise it.
+      ['fusions actually happen', SHOTS < 400 || r.merges > 0, `${r.merges}`],
+      ['the ladder actually climbs', SHOTS < 400 || parseInt(r.topByte, 16) > 2,
+        `top byte ${r.topByte}`],
+      ['constrained 4x02 collapses pairwise to 2', mg.count === 2, JSON.stringify(mg)],
+      ['and remains exactly two 04s', mg.values.length === 2 &&
+        mg.values.every(v => v === 4), JSON.stringify(mg)],
       ['edge rule is non-vacuous', r.maxEnclosed > 0,
         'no orb was ever enclosed, so isEdge was never exercised'],
       // random aim rarely dies inside a short run, so only assert it on a long one
@@ -600,7 +999,86 @@ async function main() {
       ['resume restores the board exactly', rs.ok && rs.boardMatches, JSON.stringify(rs)],
       ['resume restores score, wave and ammo',
         rs.scoreOk && rs.levelOk && rs.ammoOk && rs.parityOk && rs.statsOk,
-        JSON.stringify(rs)]
+        JSON.stringify(rs)],
+      ['DROP x2 buys four buffer shots', db.bufferLeft === 4, JSON.stringify(db)],
+      ['DROP cancels the due push', !db.pendingPush && db.parity === 0 &&
+        db.pushAnim === 0 && db.state === 'play', JSON.stringify(db)],
+      ['DROP removes only the detached tail', db.cells.length === 1 &&
+        db.cells[0].r === 0 && db.cells[0].c === 10 && db.cells[0].v === 2,
+        JSON.stringify(db)],
+      ['ordinary FF keeps the upper support stem', sf.ordinary.state === 'play' &&
+        sf.ordinary.cells.length === 2 && sf.ordinary.cells.every((x, i) =>
+          x.r === i && x.c === 5 && x.v === (i ? 4 : 2)) &&
+        sf.ordinary.bufferLeft === 7, JSON.stringify(sf)],
+      ['warp overflow becomes a SUPER FF ceiling-route drop',
+        sf.warp.state === 'clear' && sf.warp.cells.length === 0 &&
+        sf.warp.bytes === 1 && sf.warp.actionScore === 4184 &&
+        sf.warp.bufferLeft === 13, JSON.stringify(sf)],
+      ['inbound buffer never banks above 32', sf.capped.state === 'clear' &&
+        sf.capped.bufferLeft === 32, JSON.stringify(sf)],
+      ['new game is immediately resumable', !!sg.immediate &&
+        sg.immediate.cells === sg.initialCells && sg.initialCells > 0,
+        JSON.stringify(sg)],
+      ['malformed same-version save fails closed', !sg.malformed.threw &&
+        sg.malformed.available === null && sg.malformed.resumed === false,
+        JSON.stringify(sg)],
+      ['malformed buffer values are not coerced',
+        sg.malformed.rejectedBuffers.length === 2 &&
+        sg.malformed.rejectedBuffers.every(v => v === null), JSON.stringify(sg)],
+      ['legacy detached save cells are pruned without rewards', sg.repairedOk &&
+        sg.repaired.score === 321 && sg.repaired.values.length === 1 &&
+        sg.repaired.values[0] === 2, JSON.stringify(sg)],
+      ['artifact-only legacy save reloads the same wave', sg.artifactOk &&
+        sg.artifactResult.score === 654 &&
+        sg.artifactResult.level === sg.artifactLevel &&
+        sg.artifactResult.cells > 0, JSON.stringify(sg)],
+      ['legacy over-cap buffer resumes at 32', sg.capResume &&
+        sg.cappedBuffer === 32, JSON.stringify(sg)],
+      ['clear interstitial save retains its bonus', cr.cleared.state === 'clear' &&
+        cr.cleared.bonus === 5000 && cr.cleared.earned >= cr.cleared.bonus &&
+        !!cr.cleared.available && cr.cleared.available.score === cr.cleared.score,
+        JSON.stringify(cr)],
+      ['clear interstitial resumes into the next wave', !cr.threw && cr.ok &&
+        cr.state === 'play' && cr.level === cr.expectedLevel &&
+        cr.score === cr.cleared.score && cr.cells > 0, JSON.stringify(cr)],
+      ['in-flight Hyper cannot save a partial shot', hs.launched.ball &&
+        hs.launched.shots === hs.before.shots + 1 && hs.liveHyper &&
+        hs.sameDuringFlight && hs.flightResume && !hs.afterFlight.hyper &&
+        !hs.afterFlight.ball && hs.afterFlight.shots === hs.before.shots &&
+        hs.afterFlight.bufferLeft === hs.before.bufferLeft &&
+        hs.afterFlight.grid === hs.expectedGrid, JSON.stringify(hs)],
+      ['paused Hyper toggle survives reload', hs.paused.hyper &&
+        !hs.paused.clearPending && hs.pauseResume && hs.afterPause.hyper &&
+        hs.afterPause.state === 'play', JSON.stringify(hs)],
+      ['wave-clear Hyper toggle survives into the next wave', hs.cleared.hyper &&
+        hs.cleared.clearPending && hs.clearAvailable.clearPending &&
+        hs.clearResume && hs.afterClear.hyper && hs.afterClear.state === 'play' &&
+        hs.afterClear.level === hs.expectedClearLevel &&
+        hs.afterClear.shotsPerRow === 2 && hs.afterClear.cells > 0,
+        JSON.stringify(hs)],
+      ['title touch transition does not auto-fire', ip.touchResult.state === 'play' &&
+        ip.touchResult.shots === 0 && !ip.touchResult.ball, JSON.stringify(ip)],
+      ['repeated Space cannot pay and fire', ip.afterCoin.state === 'title' &&
+        ip.afterCoin.coin && ip.afterRepeat.state === 'title' &&
+        !ip.afterRepeat.ball, JSON.stringify(ip)],
+      ['title R discards a held run', ip.beforeR && ip.beforeR.score === 777 &&
+        ip.afterR && ip.afterR.score === 0 && ip.rState === 'play' && ip.rCoin,
+        JSON.stringify(ip)],
+      ['help opens, pages, and restores play', ip.helpOpen.state === 'help' &&
+        ip.helpOpen.returnState === 'play' && ip.helpOpen.page === 0 &&
+        ip.helpPage === 1 && ip.helpClosed.state === 'play' &&
+        ip.helpClosed.returnState === null, JSON.stringify(ip)],
+      ['generated boards remain ceiling-connected', gc.boards === 48 &&
+        gc.empty === 0 && gc.count === 0, JSON.stringify(gc)],
+      ['seed 75 contains a genuinely sealed cavity', sc.sealedVoids > 0 &&
+        sc.falseEdges > 0, JSON.stringify(sc)],
+      ['sealed cavities cannot define wave-1 ammo', sc.curReachable,
+        JSON.stringify(sc)],
+      ['aim prediction is read-only', ag.mutations === 0, JSON.stringify(ag)],
+      ['ghost cell matches all 41 live landings', ag.checks === 41 &&
+        ag.mismatchCount === 0, JSON.stringify(ag)],
+      ['aim sweep covers direct, banked and both-parity shots', ag.directMatched &&
+        ag.maxBounces >= 2 && ag.parityChecks.every(n => n > 0), JSON.stringify(ag)]
     ];
 
     console.log(`\n  autoplay: ${r.shots} shots, ${r.iterations} sim steps`);

@@ -40,11 +40,13 @@ Diagnostic origin: `http://127.0.0.1:18082` (loopback only, like the others).
 SS_HOST=user@host ./deploy/deploy.sh
 ```
 
-That builds, compresses, uploads, and swaps atomically. **No image rebuild, no
-restart, no downtime** — nginx mounts the site directory read-only and picks up
-whatever is there on the next request. The swap is a `mv` within one
-filesystem, so a request can never see a half-written page: it gets the old one
-or the new one.
+That builds, compresses, uploads, and replaces each file atomically. **No image
+rebuild, no restart, no downtime** — nginx mounts the site directory read-only
+and picks up whatever is there on the next request. Each swap is a `mv` within
+one filesystem, so a request can never see a half-written file. The raw and
+gzip files are separate moves, leaving a tiny mixed-version window between
+them; do not run concurrent deploys. The script retains both previous files as
+`.prev`, checks both uploaded hashes, and tests gzip integrity before succeeding.
 
 The host is not baked into the script, because this repo is public. Set
 `SS_HOST` (for example in your shell profile) or pass it inline.
@@ -159,11 +161,13 @@ loop. A missing page is a server fault, so it reports one.
 
 ## Rolling back the page
 
-Deploys overwrite in place, so keep the previous build if you want to go back:
+The deploy script keeps the immediately previous raw and gzip files. Restore
+them as a pair so compressed clients do not continue receiving the newer build:
 
 ```sh
-ssh "$SS_HOST" 'cp ~/apps/spacescience/site/index.html{,.prev}'   # before
-ssh "$SS_HOST" 'mv ~/apps/spacescience/site/index.html{.prev,}'   # after
+ssh "$SS_HOST" 'cd ~/apps/spacescience/site && \
+  cp -f index.html.prev index.html && \
+  cp -f index.html.gz.prev index.html.gz'
 ```
 
 Rolling back the *container* is a normal systemd operation; the image is stock

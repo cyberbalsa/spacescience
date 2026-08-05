@@ -2,7 +2,7 @@ import {
   R, COLS, ROWH, PF_X, PF_W, PF_TOP, DANGER_Y, DANGER_ROW, LAUNCH, SPEED, AIM_LIMIT, VW,
   TIERS, FULL, OVERFLOW, waveRows, waveShots, waveSeeds,
   baseEntropy, holeRate, dudChance, flatOdds,
-  HYPER_SHOTS, HYPER_ROWS, HYPER_MULT,
+  HYPER_SHOTS, HYPER_ROWS, HYPER_MULT, MAX_BUFFER,
   PTS_FUSE, PTS_OVERFLOW, PTS_DROP, PTS_WAVE
 } from './config.js';
 import { clamp, vcol, hexLabel } from './util.js';
@@ -34,10 +34,12 @@ export const G = {
   angle: -Math.PI / 2,
   score: 0,
   best: loadBest(),
-  level: 1, shotsPerRow: waveShots(1),
+  level: 1, shotsPerRow: waveShots(1), bufferLeft: waveShots(1),
   combo: 0, bestCombo: 0,
   shots: 0, merges: 0, bytes: 0, maxTile: TIERS[0],
-  state: 'title',     // title | play | pause | clear | over
+  state: 'title',     // title | play | pause | clear | over | help
+  helpState: null,    // transient state hidden beneath the help modal
+  helpPage: 0,
   over: 0,            // game-over animation progress
   clearAnim: 0,       // wave-clear interstitial progress
   lastBonus: 0,
@@ -89,17 +91,44 @@ export function neighbors(r, c) {
   return out;
 }
 
-// An orb is on an edge if a shot could physically reach it: it has an empty
-// neighbour, or open space below the bottom of the stack. Side walls and the
-// ceiling do not count as openings.
-export function isEdge(r, c) {
+// Empty lattice cells a shot can reach from the open space below the stack.
+// Merely bordering a hole is not enough: a completely sealed cavity is not a
+// firing lane and must not make the surrounding values loadable.
+function launcherVoids() {
+  const bottom = G.grid.length;
+  const seen = new Set(), q = [];
+
+  // A virtual empty row below the stored grid represents the launcher side of
+  // the board. Flood upward from every cell in it, stopping at occupied cells.
+  for (let c = 0; c < rowCols(bottom); c++) {
+    const k = bottom + ',' + c;
+    seen.add(k); q.push([bottom, c]);
+  }
+  while (q.length) {
+    const [r, c] = q.pop();
+    const o = par(r) ? NB_ODD : NB_EVEN;
+    for (const [dr, dc] of o) {
+      const rr = r + dr, cc = c + dc;
+      if (rr < 0 || rr > bottom || cc < 0 || cc >= rowCols(rr)) continue;
+      if (rr < bottom && G.grid[rr][cc]) continue;
+      const k = rr + ',' + cc;
+      if (seen.has(k)) continue;
+      seen.add(k); q.push([rr, cc]);
+    }
+  }
+  return seen;
+}
+
+// An orb is on an edge if one of its empty neighbours is connected to the
+// launcher. Side walls, the ceiling, and sealed internal holes do not count.
+export function isEdge(r, c, open = launcherVoids()) {
   const o = par(r) ? NB_ODD : NB_EVEN;
   for (const [dr, dc] of o) {
     const rr = r + dr, cc = c + dc;
     if (rr < 0) continue;
-    if (rr >= G.grid.length) return true;
-    if (cc < 0 || cc >= G.grid[rr].length) continue;
-    if (!G.grid[rr][cc]) return true;
+    if (rr > G.grid.length || cc < 0 || cc >= rowCols(rr)) continue;
+    if (rr < G.grid.length && G.grid[rr][cc]) continue;
+    if (open.has(rr + ',' + cc)) return true;
   }
   return false;
 }
@@ -116,10 +145,11 @@ export function boardValues() {
 // edge. Bury the last 01 behind a wall of 20s and 01 stops being offered.
 export function edgeValues() {
   const m = new Map();
+  const open = launcherVoids();
   for (let r = 0; r < G.grid.length; r++) {
     const row = G.grid[r];
     for (let c = 0; c < row.length; c++) {
-      if (!row[c] || !isEdge(r, c)) continue;
+      if (!row[c] || !isEdge(r, c, open)) continue;
       m.set(row[c].v, (m.get(row[c].v) || 0) + 1);
     }
   }
@@ -165,14 +195,15 @@ export function spawnValue() {
 // Drop any queued orb whose value is no longer reachable.
 function refreshAmmo() {
   const m = edgeValues();
-  if (!m.size) return;
-  G.dud = !m.has(G.cur);
+  if (!m.size) { G.dud = true; return; }
   // Below the dud threshold the cannon still promises usable ammo, so stale
   // values get re-rolled. Above it, being handed junk is the whole point.
-  if (dudChance(entropy()) > 0) return;
-  if (!m.has(G.cur)) G.cur = spawnValue();
-  for (let i = 0; i < G.next.length; i++)
-    if (!m.has(G.next[i])) G.next[i] = spawnValue();
+  if (dudChance(entropy()) === 0) {
+    if (!m.has(G.cur)) G.cur = spawnValue();
+    for (let i = 0; i < G.next.length; i++)
+      if (!m.has(G.next[i])) G.next[i] = spawnValue();
+  }
+  G.dud = !m.has(G.cur);
 }
 
 // How weird this wave is allowed to be. Hyper mode pins it at maximum.
@@ -284,7 +315,14 @@ function loadWave() {
   G.pushAnim = 0;
   G.ball = null;
   G.shotsPerRow = G.hyper ? HYPER_SHOTS : waveShots(G.level);
+  G.bufferLeft = G.shotsPerRow;
   generateBoard();
+  pruneFloaters();
+  // A pathological all-holes roll should still produce a playable wave.
+  if (boardEmpty()) {
+    ensureRow(0);
+    G.grid[0][randInt(G.grid[0].length)] = orb(choose(wavePool(G.level)));
+  }
   G.next = [spawnValue(), spawnValue()];
   G.cur = spawnValue();
   updateCommentaryContext();
@@ -294,10 +332,12 @@ export function toggleHyper() {
   G.hyper = !G.hyper;
   if (G.hyper) track('/hyper');
   G.shotsPerRow = G.hyper ? HYPER_SHOTS : waveShots(G.level);
+  G.bufferLeft = Math.min(G.bufferLeft, G.shotsPerRow);
   say('hyper', { on: G.hyper });
   bump('flash', 1); bump('glitch', 1); bump('shake', 28);
   Snd.fx(G.hyper ? 'overflow' : 'drop');
   updateCommentaryContext();
+  persist();
 }
 
 export function newGame() {
@@ -316,6 +356,7 @@ export function newGame() {
   say('start', {});
   resetPlaytimeMarks();
   clearSave();
+  persist();
   track('/run/start');
   Snd.music('game');
 }
@@ -368,9 +409,14 @@ export function fire(warp) {
     vx: Math.cos(G.angle) * SPEED,
     vy: Math.sin(G.angle) * SPEED
   };
-  if (!warp) { G.cur = G.next.shift(); G.next.push(spawnValue()); }
+  if (!warp) {
+    G.cur = G.next.shift();
+    G.next.push(spawnValue());
+    G.dud = !edgeValues().has(G.cur);
+  }
   G.shots++;
-  if (G.shots % G.shotsPerRow === 0) G.pendingPush = true;
+  G.bufferLeft--;
+  if (G.bufferLeft <= 0) G.pendingPush = true;
 }
 
 export function hitTest(x, y) {
@@ -389,15 +435,17 @@ export function hitTest(x, y) {
 }
 
 // Nearest empty cell that is either on the ceiling row or touching something.
-function freeCellNear(x, y) {
+// This stays pure so the renderer can ask where a shot will settle without
+// silently appending empty rows to the live board every frame.
+export function freeCellNear(x, y) {
   const rr = Math.round((y - PF_TOP - R) / ROWH);
   for (const span of [2, 4, 7]) {
     let best = null, bd = Infinity;
     for (let r = Math.max(0, rr - span); r <= rr + span; r++) {
-      ensureRow(r);
       const row = G.grid[r], cy = cellY(r);
-      for (let c = 0; c < row.length; c++) {
-        if (row[c]) continue;
+      const cols = row ? row.length : rowCols(r);
+      for (let c = 0; c < cols; c++) {
+        if (row && row[c]) continue;
         if (r > 0 && !neighbors(r, c).some(([a, b]) => at(a, b))) continue;
         const dx = x - cellX(r, c), dy = y - cy, d = dx * dx + dy * dy;
         if (d < bd) { bd = d; best = [r, c]; }
@@ -408,23 +456,35 @@ function freeCellNear(x, y) {
   return null;
 }
 
+const BALL_SUBSTEPS = 5;
+
+// Advance one gameplay tick. Both the live orb and the aim preview use this
+// path, so wall clamps and near-grazing collision decisions cannot drift.
+function advanceBall(b, onBounce) {
+  for (let s = 0; s < BALL_SUBSTEPS; s++) {
+    b.x += b.vx / BALL_SUBSTEPS;
+    b.y += b.vy / BALL_SUBSTEPS;
+    if (b.x - R < PF_X) {
+      b.x = PF_X + R;
+      b.vx = Math.abs(b.vx);
+      if (onBounce) onBounce(b);
+    } else if (b.x + R > PF_X + PF_W) {
+      b.x = PF_X + PF_W - R;
+      b.vx = -Math.abs(b.vx);
+      if (onBounce) onBounce(b);
+    }
+    if (b.y - R <= PF_TOP || hitTest(b.x, b.y)) return true;
+  }
+  return false;
+}
+
 export function moveBall() {
   const b = G.ball;
   if (!b) return;
-  const SUB = 5;
-  for (let s = 0; s < SUB; s++) {
-    b.x += b.vx / SUB;
-    b.y += b.vy / SUB;
-    if (b.x - R < PF_X) {
-      b.x = PF_X + R; b.vx = Math.abs(b.vx);
-      Snd.fx('bounce'); sparks(b.x, b.y, b.v === -1 ? '#fff' : vcol(b.v, 80));
-    } else if (b.x + R > PF_X + PF_W) {
-      b.x = PF_X + PF_W - R; b.vx = -Math.abs(b.vx);
-      Snd.fx('bounce'); sparks(b.x, b.y, b.v === -1 ? '#fff' : vcol(b.v, 80));
-    }
-    if (b.y - R <= PF_TOP) { land(b); return; }
-    if (hitTest(b.x, b.y)) { land(b); return; }
-  }
+  if (advanceBall(b, ball => {
+    Snd.fx('bounce');
+    sparks(ball.x, ball.y, ball.v === -1 ? '#fff' : vcol(ball.v, 80));
+  })) land(b);
 }
 
 function land(b) {
@@ -437,9 +497,11 @@ function land(b) {
   logShot(b.v, cell);
   if (!cell) { resolveTurn(); return; }
   const [r, c] = cell;
+  ensureRow(r);
 
+  const wasWarp = b.v === -1;
   let v = b.v;
-  if (v === -1) {
+  if (wasWarp) {
     // Warp orb takes on whichever neighbouring value it touches most.
     const tally = new Map();
     for (const [nr, nc] of neighbors(r, c)) {
@@ -458,7 +520,7 @@ function land(b) {
   logAdded('shot landed', [[r, c, v]]);
   Snd.fx('stick');
   bump('shake', 2.5);
-  resolveMerges(r, c);
+  resolveMerges(r, c, wasWarp);
 }
 
 /* ---------------------------------------------------------------- merging */
@@ -499,6 +561,10 @@ function logCollapse(chain, v, grp, pairs, raw, overflows, keep, gain, d) {
   if (d.blasted.length) {
     console.log(`[SS]      blast   ${d.blasted.length} caught in the FF detonation ` +
       d.blasted.map(([r, c, bv]) => `(${r},${c})=${hexLabel(bv)}`).join(''));
+  }
+  if (d.superDropped.length) {
+    console.log(`[SS]      SUPER FF support path dropped ` +
+      d.superDropped.map(([r, c, bv]) => `(${r},${c})=${hexLabel(bv)}`).join(''));
   }
   if (d.consumed.length) {
     console.log(`[SS]      used up ${plain(d.consumed)}`);
@@ -562,14 +628,14 @@ function reconcile() {
   }
 }
 
-function cluster(r, c, v) {
+function cluster(r, c, v, blocked) {
   const seen = new Set([r + ',' + c]);
   const out = [[r, c]], q = [[r, c]];
   while (q.length) {
     const [cr, cc] = q.pop();
     for (const [nr, nc] of neighbors(cr, cc)) {
       const k = nr + ',' + nc;
-      if (seen.has(k)) continue;
+      if (seen.has(k) || (blocked && blocked.has(k))) continue;
       const n = at(nr, nc);
       if (!n || n.v !== v) continue;
       seen.add(k); out.push([nr, nc]); q.push([nr, nc]);
@@ -655,10 +721,10 @@ function pickSurvivors(ordered, need, ax, ay) {
 // become one of the next tier, and an odd orb out is left as it was. Four 01s
 // give two 02s, not one 08 and not a single 02. Only 80 has nowhere left to
 // go, so each 80 pair overflows to FF and burns off the board.
-function collapse(r, c, chain) {
+function collapse(r, c, chain, blocked, superFF) {
   const cell = at(r, c);
   if (!cell) return [];
-  const grp = cluster(r, c, cell.v);
+  const grp = cluster(r, c, cell.v, blocked);
   if (grp.length < 2) return [];
 
   const v = cell.v;
@@ -696,7 +762,7 @@ function collapse(r, c, chain) {
   if (anchorAt > 0) keep.unshift(keep.splice(anchorAt, 1)[0]);
   const keepSet = new Set(keep.map(([kr, kc]) => kr + ',' + kc));
 
-  const collapseDetail = { consumed: [], burned: [], made: [], blasted: [] };
+  const collapseDetail = { consumed: [], burned: [], made: [], blasted: [], superDropped: [] };
   const consumed = [];
   for (const [gr, gc] of grp) {
     if (keepSet.has(gr + ',' + gc)) continue;
@@ -715,6 +781,13 @@ function collapse(r, c, chain) {
   const burned = [], made = [];
   const blasted = [], blastedSet = new Set();
   let blastGain = 0;
+  // A warp-created overflow is a SUPER FF. Before the ordinary one-ring blast
+  // removes its first neighbour, find the shortest occupied support route from
+  // each overflow site to the ceiling and drop the union of those paths.
+  const superDrop = overflows && superFF
+    ? dropSuperRoutes(keep.slice(0, pairs))
+    : { cells: [], gain: 0 };
+  collapseDetail.superDropped = superDrop.cells;
   for (let i = 0; i < pairs; i++) {
     const [nr, nc] = keep[i];
     const x = cellX(nr, nc), y = cellY(nr) + sy;
@@ -733,7 +806,7 @@ function collapse(r, c, chain) {
         if (blastedSet.has(k)) continue;
         blastedSet.add(k);
         blasted.push([er, ec, victim.v]);
-        blastGain += victim.v * PTS_DROP * 2;
+        blastGain += victim.v * PTS_DROP * 2 * (G.hyper ? HYPER_MULT : 1);
         G.grid[er][ec] = null;
         burst(cellX(er, ec), cellY(er) + sy, victim.v, 16);
       }
@@ -770,7 +843,7 @@ function collapse(r, c, chain) {
 
   if (overflows) {
     bump('shake', 20 + pairs * 4); bump('glitch', 1); bump('flash', 0.85);
-    say('burn', { n: pairs, blast: blasted.length });
+    say('burn', { n: pairs, blast: blasted.length, super: superDrop.cells.length });
     Snd.fx('overflow');
   } else {
     bump('shake', 4 + chain * 3 + Math.log2(raw));
@@ -779,24 +852,33 @@ function collapse(r, c, chain) {
     say('fuse', { v: raw, chain, pairs });
     Snd.fx('merge', raw);
   }
-  return fresh;
+  // Products made by one pairwise collapse are siblings, not a new input
+  // group. Keep them from consuming one another during this resolution pass;
+  // each can still cascade with tiles that existed before this collapse.
+  const siblingKeys = new Set(fresh.map(([fr, fc]) => fr + ',' + fc));
+  return fresh.map(([fr, fc]) => {
+    const siblings = new Set(siblingKeys);
+    siblings.delete(fr + ',' + fc);
+    return [fr, fc, siblings];
+  });
 }
 
-function resolveMerges(r, c) {
+function resolveMerges(r, c, superFF = false) {
   let chain = 0;
   // Freshly doubled orbs can land next to their own kind, so cascades are
   // driven off a worklist rather than just re-checking the landing cell.
-  const work = [[r, c]];
+  const work = [[r, c, null]];
   while (work.length) {
     let picked = -1;
     for (let i = 0; i < work.length; i++) {
-      const cell = at(work[i][0], work[i][1]);
-      if (cell && cluster(work[i][0], work[i][1], cell.v).length >= 2) { picked = i; break; }
+      const [wr, wc, blocked] = work[i];
+      const cell = at(wr, wc);
+      if (cell && cluster(wr, wc, cell.v, blocked).length >= 2) { picked = i; break; }
     }
     if (picked < 0) break;
-    const [cr, cc] = work.splice(picked, 1)[0];
+    const [cr, cc, blocked] = work.splice(picked, 1)[0];
     // Each collapse strictly shrinks the group it consumed, so this terminates.
-    work.push(...collapse(cr, cc, ++chain));
+    work.push(...collapse(cr, cc, ++chain, blocked, superFF));
   }
   if (chain === 0) {
     G.combo = 0;
@@ -828,6 +910,94 @@ function ceilingSet(extra) {
   return seen;
 }
 
+// Shortest occupied route from an empty FF site to any ceiling-row orb. The
+// board is normally ceiling-connected, but returning an empty path keeps the
+// effect safe for damaged legacy/debug layouts as well.
+function occupiedRouteToCeiling(sr, sc) {
+  if (sr === 0) return [];
+  const q = [], parent = new Map(), cellByKey = new Map();
+  for (const [r, c] of neighbors(sr, sc)) {
+    if (!at(r, c)) continue;
+    const k = r + ',' + c;
+    if (parent.has(k)) continue;
+    parent.set(k, null); cellByKey.set(k, [r, c]); q.push(k);
+  }
+  for (let head = 0; head < q.length; head++) {
+    const k = q[head], [r, c] = cellByKey.get(k);
+    if (r === 0) {
+      const path = [];
+      for (let cur = k; cur !== null; cur = parent.get(cur))
+        path.push(cellByKey.get(cur));
+      return path;
+    }
+    for (const [nr, nc] of neighbors(r, c)) {
+      if (!at(nr, nc)) continue;
+      const nk = nr + ',' + nc;
+      if (parent.has(nk)) continue;
+      parent.set(nk, k); cellByKey.set(nk, [nr, nc]); q.push(nk);
+    }
+  }
+  return [];
+}
+
+// Remove and score the support paths selected by a warp-created FF. Cells in
+// the ordinary blast ring retain the blast's double drop-value score; the rest
+// receive normal drop value. Every routed cell buys the same two buffer shots
+// as any other drop, and resolveTurn() subsequently drops newly orphaned limbs.
+function dropSuperRoutes(sites) {
+  const chosen = new Map(), blastRing = new Set();
+  for (const [r, c] of sites) {
+    for (const [nr, nc] of neighbors(r, c)) blastRing.add(nr + ',' + nc);
+    for (const [rr, cc] of occupiedRouteToCeiling(r, c))
+      chosen.set(rr + ',' + cc, [rr, cc]);
+  }
+
+  let gain = 0;
+  const cells = [], sy = rowShift();
+  for (const [k, [r, c]] of chosen) {
+    const b = at(r, c);
+    if (!b) continue;
+    const blastMult = blastRing.has(k) ? 2 : 1;
+    gain += b.v * PTS_DROP * blastMult * (G.hyper ? HYPER_MULT : 1);
+    cells.push([r, c, b.v]);
+    G.grid[r][c] = null;
+    burst(cellX(r, c), cellY(r) + sy, b.v, 18);
+  }
+  if (!cells.length) return { cells, gain: 0 };
+
+  TURN.removed += cells.length;
+  G.score += gain;
+  const bufferAdded = extendBuffer(cells.length * 2);
+  logRemoved('SUPER FF support path', cells);
+  const [fr, fc] = sites[0];
+  popText(cellX(fr, fc), cellY(fr) + sy + 42,
+    'SUPER FF  DROP x' + cells.length + '  +' + gain +
+    '  BUFFER +' + bufferAdded, '#ff8cff', 3.5);
+  say('drop', { n: cells.length, super: true });
+  bump('shake', 12 + cells.length * 2);
+  bump('glitch', 1);
+  return { cells, gain };
+}
+
+function extendBuffer(turns) {
+  const before = clamp(G.bufferLeft, 0, MAX_BUFFER);
+  G.bufferLeft = Math.min(MAX_BUFFER, G.bufferLeft + turns);
+  G.bufferLeft = clamp(G.bufferLeft, 0, MAX_BUFFER);
+  if (G.bufferLeft > 0) G.pendingPush = false;
+  return G.bufferLeft - before;
+}
+
+// Wave generators deliberately leave holes, but a new board must not start
+// with already-detached cells that award free points on the first shot.
+function pruneFloaters() {
+  if (!G.grid.length) return;
+  const keep = ceilingSet();
+  for (let r = 0; r < G.grid.length; r++)
+    for (let c = 0; c < G.grid[r].length; c++)
+      if (G.grid[r][c] && !keep.has(r + ',' + c)) G.grid[r][c] = null;
+  trimRows();
+}
+
 // Anything no longer reachable from the ceiling row falls off for bonus points.
 function dropFloaters() {
   if (!G.grid.length) return 0;
@@ -847,9 +1017,13 @@ function dropFloaters() {
     }
   if (n) {
     TURN.removed += n;
+    // Cutting cells loose buys two extra shots per cell. This is applied before
+    // resolving a due push, so a drop on the last shot postpones the buffer.
+    const bufferAdded = extendBuffer(n * 2);
     logRemoved('cut loose from the ceiling', fell);
     G.score += gain;
-    popText(VW / 2, 300, 'DROP x' + n + '  +' + gain, '#7fffd4', 3.2);
+    popText(VW / 2, 300, 'DROP x' + n + '  +' + gain + '  BUFFER +' + bufferAdded,
+      '#7fffd4', 3.2);
     say('drop', { n });
     bump('shake', 6 + n);
     Snd.fx('drop');
@@ -868,7 +1042,16 @@ function resolveTurn() {
   // Clearing beats the wall: check for an empty board before pushing a row in.
   if (boardEmpty()) { waveClear(); return; }
 
-  if (G.pendingPush) { G.pendingPush = false; pushRow(); }
+  if (G.pendingPush) {
+    G.pendingPush = false;
+    pushRow();
+    G.bufferLeft = G.shotsPerRow;
+    // Holes in the incoming row can sever branches that used to touch the
+    // ceiling. Drop them before deciding whether anything crossed the line.
+    dropFloaters();
+    trimRows();
+    if (boardEmpty()) { waveClear(); return; }
+  }
 
   for (let r = 0; r < G.grid.length; r++) {
     if (cellY(r) <= DANGER_Y) continue;
@@ -895,7 +1078,7 @@ function updateCommentaryContext() {
   CTX.wave = G.level;
   CTX.orbs = orbs;
   CTX.shots = G.shots;
-  CTX.bufferIn = G.shotsPerRow - (G.shots % G.shotsPerRow);
+  CTX.bufferIn = G.bufferLeft;
   CTX.topByte = G.maxTile;
   CTX.edgeKinds = edge.size;
   CTX.buried = [...all.keys()].filter(v => !edge.has(v)).length;
@@ -916,6 +1099,9 @@ function waveClear() {
   track('/wave-clear/' + waveBucket(G.level));
   Snd.fx('win');
   bump('flash', 1); bump('glitch', 1); bump('shake', 20);
+  // The live board is empty, so mark this save as a completed wave. Resuming
+  // consumes the marker and generates the next wave from this exact RNG state.
+  writeSave(snapshot());
 }
 
 export function nextWave() {
@@ -957,42 +1143,80 @@ export function snapshot() {
   return {
     grid: G.grid.map(row => row.map(b => (b ? b.v : 0))),
     parity: G.parity,
-    level: G.level, shotsPerRow: G.shotsPerRow, shots: G.shots,
+    level: G.level, shotsPerRow: G.shotsPerRow,
+    bufferLeft: G.bufferLeft, shots: G.shots,
     score: G.score, combo: G.combo, bestCombo: G.bestCombo,
     merges: G.merges, bytes: G.bytes, maxTile: G.maxTile,
     cur: G.cur, next: G.next.slice(),
     charge: G.charge, warpReady: G.warpReady,
     hyper: G.hyper, dudStreak: G.dudStreak, startedAt: G.startedAt,
     pendingPush: G.pendingPush,
+    clearPending: G.state === 'clear',
     seed: RNG.seed, rng: getRngState()
   };
 }
 
 export function persist() {
-  // A finished run is not worth resuming into.
-  if (G.state !== 'play') return;
+  // Saves describe settled lattice states; a flying orb is not represented in
+  // snapshot(), so writing here would consume its ammo and buffer turn while
+  // silently losing the shot on reload. Pause and wave-clear are safe to save
+  // when settled, which also makes a Hyper toggle in either state durable.
+  if (G.ball || (G.state !== 'play' && G.state !== 'pause' && G.state !== 'clear')) return;
   writeSave(snapshot());
 }
 
-// Rejects anything whose geometry does not match the current rules, rather
-// than loading a board that cannot be played.
+const validInt = (v, min = 0) => Number.isSafeInteger(v) && v >= min;
+const validByte = v => Number.isInteger(v) && !(v & 1) && v >= 2 && v <= 0xFE;
+
+// Version-3 saves written before bufferLeft existed derive the same countdown
+// they used to display. New snapshots always carry the independent counter.
+function savedBufferLeft(s) {
+  if (s.bufferLeft !== undefined && !validInt(s.bufferLeft)) return NaN;
+  const left = s.bufferLeft !== undefined
+    ? s.bufferLeft
+    : s.pendingPush ? 0 : s.shotsPerRow - (s.shots % s.shotsPerRow);
+  return Math.min(MAX_BUFFER, left);
+}
+
+// Reject anything whose geometry or gameplay fields do not match the current
+// rules. A readable version stamp alone is not enough: malformed localStorage
+// must fail closed rather than throwing halfway through resumeGame().
 function validSnapshot(s) {
-  if (!s || !Array.isArray(s.grid)) return false;
-  if (typeof s.parity !== 'number' || (s.parity & 1) !== s.parity) return false;
+  if (!s || typeof s !== 'object' || !Array.isArray(s.grid)) return false;
+  if (s.parity !== 0 && s.parity !== 1) return false;
+  if (s.grid.length > DANGER_ROW + 1) return false;
+  if (!validInt(s.level, 1) || s.level > 1000000) return false;
+  if (!validInt(s.shotsPerRow, 1) ||
+      s.shotsPerRow !== (s.hyper ? HYPER_SHOTS : waveShots(s.level))) return false;
+  if (!validInt(s.shots) || !validInt(s.score) || !validInt(s.combo) ||
+      !validInt(s.bestCombo) || !validInt(s.merges) || !validInt(s.bytes) ||
+      !validInt(s.dudStreak) || !validInt(s.startedAt)) return false;
+  if (!(s.maxTile === FULL || validByte(s.maxTile))) return false;
+  if (!validByte(s.cur) || !Array.isArray(s.next) || s.next.length !== 2 ||
+      !s.next.every(validByte)) return false;
+  if (typeof s.charge !== 'number' || !Number.isFinite(s.charge) ||
+      s.charge < 0 || s.charge > 1 || typeof s.warpReady !== 'boolean' ||
+      typeof s.hyper !== 'boolean' || typeof s.pendingPush !== 'boolean') return false;
+  if (s.clearPending !== undefined && typeof s.clearPending !== 'boolean') return false;
+  if (!validInt(savedBufferLeft(s))) return false;
+  if (!validInt(s.seed) || s.seed > 0xFFFFFFFF || !Number.isInteger(s.rng) ||
+      s.rng < -0x80000000 || s.rng > 0xFFFFFFFF) return false;
+
   const saved = G.parity;
   G.parity = s.parity;
-  let ok = true;
+  let ok = true, cells = 0;
   for (let r = 0; r < s.grid.length; r++) {
     const row = s.grid[r];
     if (!Array.isArray(row) || row.length !== rowCols(r)) { ok = false; break; }
     for (const v of row) {
       if (v === 0) continue;
-      if (typeof v !== 'number' || (v & 1) || v < 2 || v > 0xFE) { ok = false; break; }
+      if (!validByte(v)) { ok = false; break; }
+      cells++;
     }
     if (!ok) break;
   }
   G.parity = saved;
-  return ok;
+  return ok && (!s.clearPending || cells === 0);
 }
 
 export function resumeAvailable() {
@@ -1000,8 +1224,13 @@ export function resumeAvailable() {
   if (!s || !validSnapshot(s)) return null;
   let cells = 0;
   for (const row of s.grid) for (const v of row) if (v) cells++;
-  if (!cells) return null;
-  return { level: s.level || 1, score: s.score || 0, cells };
+  if (!cells && !s.clearPending) return null;
+  return {
+    level: s.level + (s.clearPending ? 1 : 0),
+    score: s.score,
+    cells,
+    clearPending: !!s.clearPending
+  };
 }
 
 export function resumeGame() {
@@ -1010,7 +1239,8 @@ export function resumeGame() {
 
   G.parity = s.parity;
   G.grid = s.grid.map(row => row.map(v => (v ? { v, pop: 1, born: 0 } : null)));
-  G.level = s.level; G.shotsPerRow = s.shotsPerRow; G.shots = s.shots;
+  G.level = s.level; G.shotsPerRow = s.shotsPerRow;
+  G.bufferLeft = savedBufferLeft(s); G.shots = s.shots;
   G.score = s.score; G.combo = s.combo; G.bestCombo = s.bestCombo;
   G.merges = s.merges; G.bytes = s.bytes; G.maxTile = s.maxTile;
   G.cur = s.cur; G.next = s.next.slice();
@@ -1023,11 +1253,27 @@ export function resumeGame() {
   setSeed(s.seed);
   setRngState(s.rng);
 
+  if (s.clearPending) {
+    G.level++;
+    loadWave();
+  } else {
+    // Version 3 predates the corrected inbound-row ordering, so a legacy save
+    // can contain cells that are already disconnected from the ceiling. Repair
+    // them silently: awarding a DROP on the first resumed turn would change
+    // both score and buffer time merely because the page was reloaded.
+    pruneFloaters();
+    // If a legacy snapshot consisted only of detached artifacts, keep the
+    // player's run totals but reload the same wave instead of opening on an
+    // empty, unplayable board or granting an unearned clear.
+    if (boardEmpty()) loadWave();
+  }
   G.state = 'play';
   clearFX();
   resetCommentary();
   resetPlaytimeMarks();
+  refreshAmmo();
   updateCommentaryContext();
+  persist();
   track('/run/resume');
   Snd.music('game');
   return true;
@@ -1035,16 +1281,18 @@ export function resumeGame() {
 
 /* ----------------------------------------------------------- aim trajectory */
 export function trace() {
-  let x = LAUNCH.x, y = LAUNCH.y - 6;
-  let vx = Math.cos(G.angle) * SPEED, vy = Math.sin(G.angle) * SPEED;
-  const pts = [[x, y]];
+  const b = {
+    x: LAUNCH.x, y: LAUNCH.y - 6, v: G.cur,
+    vx: Math.cos(G.angle) * SPEED,
+    vy: Math.sin(G.angle) * SPEED
+  };
+  const pts = [[b.x, b.y]];
   for (let i = 0; i < 420; i++) {
-    x += vx * 0.5; y += vy * 0.5;
-    if (x - R < PF_X) { x = PF_X + R; vx = Math.abs(vx); pts.push([x, y]); }
-    else if (x + R > PF_X + PF_W) { x = PF_X + PF_W - R; vx = -Math.abs(vx); pts.push([x, y]); }
-    if (y - R <= PF_TOP) { pts.push([x, y]); break; }
-    if (hitTest(x, y)) { pts.push([x, y]); break; }
+    if (advanceBall(b, ball => pts.push([ball.x, ball.y]))) {
+      pts.push([b.x, b.y]);
+      break;
+    }
   }
-  if (pts.length < 2) pts.push([x, y]);
-  return pts;
+  if (pts.length < 2) pts.push([b.x, b.y]);
+  return { pts, cell: freeCellNear(b.x, b.y) };
 }

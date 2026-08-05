@@ -4,6 +4,12 @@ import { G, fire, newGame, setAim, nextWave, toggleHyper, resumeGame, resumeAvai
 import { Snd } from './audio.js';
 
 export const keys = { left: false, right: false, shift: false };
+export const HELP_PAGE_COUNT = 6;
+const HELP_STATES = new Set(['title', 'play', 'pause', 'clear', 'over']);
+
+// A touch that advances an interstitial is one complete confirm gesture. Keep
+// its matching lift from leaking through into play and launching an orb.
+let touchConsumed = false;
 
 // Up up down down left right left right. The arrows still steer the cannon
 // while you type it, which is half the fun.
@@ -16,6 +22,25 @@ function trackKonami(k) {
     konami.length = 0;
     toggleHyper();
   }
+}
+
+function openHelp() {
+  if (!HELP_STATES.has(G.state)) return;
+  G.helpState = G.state;
+  G.helpPage = 0;
+  G.state = 'help';
+  keys.left = keys.right = keys.shift = false;
+  konami.length = 0;
+  // If help opened while a touch was held, its eventual lift must not fire
+  // after the modal closes. A fresh gesture resets this on touchstart.
+  touchConsumed = true;
+}
+
+function closeHelp() {
+  if (G.state !== 'help') return;
+  G.state = HELP_STATES.has(G.helpState) ? G.helpState : 'title';
+  G.helpState = null;
+  keys.left = keys.right = keys.shift = false;
 }
 
 function toVirtual(clientX, clientY) {
@@ -53,40 +78,83 @@ function advanceScreen() {
 export function initInput() {
   window.addEventListener('resize', resize);
 
-  window.addEventListener('mousemove', e => aimAt(e.clientX, e.clientY));
+  window.addEventListener('mousemove', e => {
+    if (G.state !== 'help') aimAt(e.clientX, e.clientY);
+  });
 
   window.addEventListener('mousedown', e => {
+    if (e.button !== 0 || G.state === 'help') return;
     Snd.start();
     if (advanceScreen()) return;
     aimAt(e.clientX, e.clientY);
     fire(e.shiftKey && G.warpReady);
   });
 
+  window.addEventListener('contextmenu', e => e.preventDefault());
+
   window.addEventListener('touchstart', e => {
     e.preventDefault();
+    if (e.touches.length === 1) touchConsumed = false;
+    if (G.state === 'help') { touchConsumed = true; return; }
     Snd.start();
     const t = e.touches[0];
     if (t) aimAt(t.clientX, t.clientY);
-    advanceScreen();
+    if (advanceScreen()) touchConsumed = true;
   }, { passive: false });
 
   window.addEventListener('touchmove', e => {
     e.preventDefault();
+    if (G.state === 'help') return;
     const t = e.touches[0];
     if (t) aimAt(t.clientX, t.clientY);
   }, { passive: false });
 
   window.addEventListener('touchend', e => {
     e.preventDefault();
+    if (touchConsumed) {
+      if (e.touches.length === 0) touchConsumed = false;
+      return;
+    }
     if (G.state === 'play') fire(G.warpReady && e.touches.length > 0);
   }, { passive: false });
 
+  window.addEventListener('touchcancel', e => {
+    if (e.touches.length === 0) touchConsumed = false;
+  });
+
   window.addEventListener('keydown', e => {
     const k = e.key;
-    trackKonami(k);
+
+    // Help is a real modal state: its navigation never steers the launcher,
+    // feeds the cheat sequence, or falls through to any gameplay shortcut.
+    if (G.state === 'help') {
+      e.preventDefault();
+      if (e.repeat) return;
+      if (k === 'h' || k === 'H' || k === 'Escape') closeHelp();
+      else if (k === 'ArrowLeft')
+        G.helpPage = (G.helpPage + HELP_PAGE_COUNT - 1) % HELP_PAGE_COUNT;
+      else if (k === 'ArrowRight')
+        G.helpPage = (G.helpPage + 1) % HELP_PAGE_COUNT;
+      return;
+    }
+    if (k === 'h' || k === 'H') {
+      e.preventDefault();
+      if (!e.repeat) openHelp();
+      return;
+    }
+
+    if (!e.repeat) trackKonami(k);
     if (k === 'Shift') keys.shift = true;
     if (k === 'ArrowLeft' || k === 'a' || k === 'A') keys.left = true;
     if (k === 'ArrowRight' || k === 'd' || k === 'D') keys.right = true;
+
+    // Key repeat is useful for held steering only. Every action below is a
+    // discrete press; letting repeats through can launch the title screen and
+    // fire without a release, or rapidly oscillate pause/audio toggles.
+    if (e.repeat) {
+      if (k === ' ' || k === 'Enter') e.preventDefault();
+      return;
+    }
 
     if (k === ' ' || k === 'Enter') {
       e.preventDefault();
@@ -98,7 +166,19 @@ export function initInput() {
       if (G.state === 'play') G.state = 'pause';
       else if (G.state === 'pause') G.state = 'play';
     }
-    if ((k === 'r' || k === 'R') && G.state !== 'title') newGame();
+    if (k === 'r' || k === 'R') {
+      // The title advertises R as the way to discard a held run. newGame()
+      // clears that save; wake audio here because this may be the first input.
+      if (G.state === 'title') {
+        if (resumeAvailable()) {
+          Snd.start();
+          G.coin = true;
+          newGame();
+        }
+      } else {
+        newGame();
+      }
+    }
     if (k === 'm' || k === 'M') { Snd.start(); Snd.toggleMusic(); }
     if (k === 's' || k === 'S') Snd.S.sfx = !Snd.S.sfx;
     if (k === 'f' || k === 'F') G.funFact = !G.funFact;   // easter egg
@@ -118,5 +198,6 @@ export function initInput() {
   // Losing focus mid-hold would otherwise leave the cannon spinning.
   window.addEventListener('blur', () => {
     keys.left = keys.right = keys.shift = false;
+    touchConsumed = false;
   });
 }

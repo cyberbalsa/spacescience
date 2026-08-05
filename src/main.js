@@ -17,17 +17,20 @@
  * CC BY-SA 4.0 and keeps its own licence; see README.md.
  */
 import { resize, ctx, cvs } from './canvas.js';
-import { G, moveBall, nudgeAim, seedAttract, nextWave, newGame, resumeGame, resumeAvailable, LOG } from './game.js';
+import {
+  G, moveBall, nudgeAim, seedAttract, nextWave, newGame,
+  resumeGame, resumeAvailable, trace, LOG
+} from './game.js';
 import { stepFX } from './fx.js';
-import { renderWorld, present } from './render.js';
+import { renderWorld, present, clearPanelCache } from './render.js';
 import { initInput, keys } from './input.js';
 import { Snd } from './audio.js';
 import { clearTextCaches } from './text.js';
 import { clearSprites } from './sprites.js';
 import { RNG, initSeed, setSeed } from './rng.js';
-import { track, trackPlaytime, ANALYTICS } from './analytics.js';
+import { track, trackPlaytime, primePlaytimeMarks, ANALYTICS } from './analytics.js';
 import { STATS, addPlaytime, flushStats } from './stats.js';
-import { PROF, profInit, begin, lap, frameDone, drawReport, drawLive, summary } from './profile.js';
+import { PROF, profInit, hashFlag, begin, lap, frameDone, drawReport, drawLive, summary } from './profile.js';
 
 const STEP = 1 / 60;
 let T = 0, last = 0, acc = 0;
@@ -94,14 +97,18 @@ export function boot() {
   initInput();
   // Opt-in inspection hook. Exposing step() lets the smoke test advance the
   // simulation far faster than a headless browser will produce frames.
-  if (/debug|bench|profile/.test(location.hash)) {
-    window.SPACESCIENCE = { G, nextWave, step, PROF, summary, Snd, LOG,
+  if (hashFlag('debug') || hashFlag('bench') || hashFlag('profile')) {
+    window.SPACESCIENCE = { G, nextWave, step, trace, PROF, summary, Snd, LOG,
       setSeed, newGame, resumeGame, resumeAvailable, STATS, ANALYTICS };
-    LOG.chains = location.hash.includes('debug');
+    LOG.chains = hashFlag('debug');
   }
   const el = document.getElementById('boot');
   if (el) el.remove();
-  track('/load');
+  primePlaytimeMarks(STATS.totalMs);
+  // The Cloudflare module appears after the game in index.html. Waiting for the
+  // window load event lets it install its pushState hook without delaying boot.
+  if (document.readyState === 'complete') track('/load');
+  else window.addEventListener('load', () => track('/load'), { once: true });
   // Persist career stats on the way out; pagehide fires where unload does not.
   window.addEventListener('pagehide', flushStats);
   document.addEventListener('visibilitychange', () => {
@@ -116,7 +123,7 @@ export function boot() {
   // Sprites built before the webfont arrives would cache the fallback face
   // forever, so drop every cache once it is really available.
   if (document.fonts && document.fonts.load) {
-    const refresh = () => { clearTextCaches(); clearSprites(); };
+    const refresh = () => { clearTextCaches(); clearSprites(); clearPanelCache(); };
     document.fonts.load('16px "VGA437"').then(refresh).catch(refresh);
     if (document.fonts.ready) document.fonts.ready.then(refresh).catch(() => {});
   }

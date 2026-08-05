@@ -179,7 +179,7 @@ function glyph(ch, hueBucket) {
   return sp;
 }
 
-export function drawScroller(g, t, y) {
+export function drawScroller(g, t, y, frameScale = 1) {
   // Retire characters that have scrolled off the left, then top the buffer up.
   while (scrollX <= -CHAR_W && buf.length) { buf = buf.slice(1); scrollX += CHAR_W; }
   // Only pull more text when the commentator actually has news. When it does
@@ -222,6 +222,6 @@ export function drawScroller(g, t, y) {
     x += CHAR_W;
   }
 
-  scrollX -= SCROLL_SPEED;
+  scrollX -= SCROLL_SPEED * frameScale;
   g.restore();
 }

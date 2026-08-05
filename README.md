@@ -38,6 +38,9 @@ Every cell is an **even** byte, and it wears its hex value: `02 04 08 10 20 40 8
 - **The cannon only loads values sitting on an exposed edge.** Bury the last `02`
   behind a wall of `20`s and the game stops handing you `02`. Watch what you seal in.
 - **Knock a cluster loose from the ceiling** and the whole thing drops for points.
+  A `DROP xN` also adds `2N` shots to the inbound-buffer countdown (`DROP x3`
+  buys six), so a well-timed collapse can postpone a row that was about to flush.
+  The countdown can bank at most 32 shots.
 - **The inbound buffer flushes** every few shots, pushing a new row down. Let the
   stack cross the red line and you are done.
 - **Later waves get stranger.** An entropy curve ramps from wave 1 (a tidy board,
@@ -48,7 +51,10 @@ Every cell is an **even** byte, and it wears its hex value: `02 04 08 10 20 40 8
   still pair, but stack them carelessly and you choke the lattice with values you
   cannot use. Watch the `ENTROPY` meter and the `DUD` warning on the chamber.
 - **Warp orb**: fusions charge a meter. When it is full, `SHIFT`+fire launches a
-  wildcard that becomes whatever it lands against.
+  wildcard that becomes whatever it lands against. If that wildcard causes an
+  `FF` overflow, it becomes a **SUPER FF**: the shortest occupied support path
+  from the blast to the ceiling drops too, followed by anything that path was
+  holding up. Every one of those drops extends the inbound buffer as usual.
 
 The scroller along the bottom is a commentator, not a fixed greetz blob — it
 reacts to your last few moves and to the state of the board. It only runs when
@@ -92,11 +98,15 @@ gone — so they were made heavier and retested.
 | Click / `Space` | insert coin, then fire |
 | `Shift` + fire | warp orb (when charged) |
 | `P` / `Esc` | pause |
+| `H` | open the paged field manual (`←` / `→` to turn pages) |
 | `R` | restart |
 | `M` / `S` | toggle music / SFX |
 | `L` | trace every fusion chain to the console |
 
 Touch works too: drag to aim, lift to fire.
+
+The dotted guide follows the shot's physical route, including wall bounces; its
+ghost hex is snapped to the exact lattice cell where the shot will first land.
 
 The title screen takes a coin before it launches. That is not only theming —
 browsers let audio start on a real gesture, and if that same keypress also

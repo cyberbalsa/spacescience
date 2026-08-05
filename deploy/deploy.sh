@@ -38,11 +38,18 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 cp "$SRC" "$TMP/index.html"
 gzip -9 -k -f "$TMP/index.html"
+RAW_SHA="$(sha256sum "$TMP/index.html" | cut -d' ' -f1)"
+GZ_SHA="$(sha256sum "$TMP/index.html.gz" | cut -d' ' -f1)"
 printf '     raw %s  gz %s\n' \
   "$(du -h "$TMP/index.html" | cut -f1)" "$(du -h "$TMP/index.html.gz" | cut -f1)"
 
 echo "==> uploading to $HOST:$REMOTE_DIR"
-ssh "$HOST" "mkdir -p ~/$REMOTE_DIR/site"
+if [[ $SETUP -eq 1 ]]; then
+  # A genuinely fresh account may not have systemd's user-unit path yet.
+  ssh "$HOST" "mkdir -p ~/$REMOTE_DIR/site ~/.config/containers/systemd"
+else
+  ssh "$HOST" "mkdir -p ~/$REMOTE_DIR/site"
+fi
 scp -q "$TMP/index.html"    "$HOST:$REMOTE_DIR/site/.index.html.new"
 scp -q "$TMP/index.html.gz" "$HOST:$REMOTE_DIR/site/.index.html.gz.new"
 
@@ -63,6 +70,8 @@ echo "==> swapping in"
 ssh "$HOST" "
   set -e
   cd ~/$REMOTE_DIR/site
+  if [ -f index.html ]; then cp -f index.html index.html.prev; fi
+  if [ -f index.html.gz ]; then cp -f index.html.gz index.html.gz.prev; fi
   mv -f .index.html.new    index.html
   mv -f .index.html.gz.new index.html.gz
   chmod 0644 index.html index.html.gz
@@ -82,6 +91,11 @@ fi
 echo "==> verifying origin"
 ssh "$HOST" "
   set -e
+  cd ~/$REMOTE_DIR/site
+  [ \"\$(sha256sum index.html | cut -d' ' -f1)\" = '$RAW_SHA' ]
+  [ \"\$(sha256sum index.html.gz | cut -d' ' -f1)\" = '$GZ_SHA' ]
+  gzip -t index.html.gz
+  echo '    upload hashes and gzip integrity ok'
   curl -fsS http://127.0.0.1:18082/healthz >/dev/null && echo '    healthz ok'
   code=\$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18082/)
   size=\$(curl -sS -o /dev/null -w '%{size_download}' http://127.0.0.1:18082/)
