@@ -92,4 +92,11 @@ export const PTS_DROP = 4;          // x orb value, per orb knocked loose
 export const PTS_WAVE = 5000;       // x wave number
 
 export const TITLE = 'SPACE SCIENCE';
+export const SITE = 'spacescience.tech';
+export const REPO = 'github.com/cyberbalsa';
+
+// build.mjs rewrites the stamp below. Unbundled (npm run dev) it stays as the
+// marker, which does not start with a digit, so it reads as "dev".
+const STAMP = '@@VERSION@@';
+export const VERSION = /^\d/.test(STAMP) ? STAMP : 'dev';
 

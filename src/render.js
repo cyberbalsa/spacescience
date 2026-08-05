@@ -1,6 +1,6 @@
 import {
   VW, VH, R, COLS, ROWH, TAU, PF_X, PF_W, PF_TOP, DANGER_Y,
-  FRAME, LEFT_PANEL, RIGHT_PANEL, LAUNCH, TIERS, FULL, TITLE
+  FRAME, LEFT_PANEL, RIGHT_PANEL, LAUNCH, TIERS, FULL, TITLE, SITE, REPO, VERSION
 } from './config.js';
 import { cvs, ctx, wc, w, VIEW, SCREEN } from './canvas.js';
 import { rnd, rint, vcol, hexLabel } from './util.js';
@@ -439,11 +439,14 @@ function drawRightPanel(g, t) {
   g.lineWidth = 1;
   g.strokeRect(RX + 22.5, RY + 462.5, ew - 1, 8);
 
-  drawWire(g, RX + RW / 2, RY + RH - 100, 38, t, (t * 30) % 360);
-  neon(g, 'SEED ' + RNG.seed, RX + RW / 2, RY + RH - 36, 10, '#7a8cc9',
+  // Wireframe sits a little higher to clear the three footer lines.
+  drawWire(g, RX + RW / 2, RY + RH - 114, 36, t, (t * 30) % 360);
+  neon(g, 'SEED ' + RNG.seed, RX + RW / 2, RY + RH - 52, 9, '#7a8cc9',
     { align: 'center', track: 1, glow: 4 });
-  neon(g, '// ' + TITLE + ' 2026', RX + RW / 2, RY + RH - 20, 12, '#5cffb0',
+  neon(g, SITE, RX + RW / 2, RY + RH - 34, 12, '#5cffb0',
     { align: 'center', track: 2, glow: 8 });
+  neon(g, REPO + '  //  v' + VERSION, RX + RW / 2, RY + RH - 18, 9, '#7a8cc9',
+    { align: 'center', track: 1, glow: 4 });
 }
 
 /* --------------------------------------------------------------- fun fact */

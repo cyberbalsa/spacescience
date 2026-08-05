@@ -181,6 +181,24 @@ function embedFonts(css) {
   return out;
 }
 
+/* --------------------------------------------------------------- version  */
+// A UTC build stamp, so what is on screen identifies exactly which build is
+// deployed. Sortable, and precise enough to tell two deploys on the same day
+// apart -- which matters when the deploy is a file copy with no image tag.
+const VERSION_MARKER = '@@VERSION@@';
+
+function stampVersion(js) {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  const stamp = `1.${p(d.getUTCFullYear() % 100)}${p(d.getUTCMonth() + 1)}` +
+    `${p(d.getUTCDate())}.${p(d.getUTCHours())}${p(d.getUTCMinutes())}`;
+  if (!js.includes(VERSION_MARKER)) {
+    throw new Error('version marker missing; the page would display "dev"');
+  }
+  console.log(`  version v${stamp}`);
+  return js.replace(VERSION_MARKER, stamp);
+}
+
 /* ----------------------------------------------------------------- build  */
 function build() {
   collect(ENTRY);
@@ -207,6 +225,7 @@ function build() {
   const banner = '/* SPACE SCIENCE (C) 2026 Balsa - GPL-2.0 - ' +
     'https://github.com/cyberbalsa/spacescience */\n';
   let js = banner + `(function () {\n"use strict";\n\n${chunks.join('\n')}\n})();`;
+  js = stampVersion(js);
   js = embedMusic(js);
   const css = embedFonts(fs.readFileSync(path.join(SRC, 'style.css'), 'utf8').trim());
 
