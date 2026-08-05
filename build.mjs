@@ -151,6 +151,36 @@ function embedMusic(js) {
   return js.replace(MUSIC_MARKER, '{\n' + entries.join(',\n') + '\n}');
 }
 
+/* ------------------------------------------------------------------ font  */
+// Same trick as the music: the @font-face url becomes a data: payload so the
+// bundle carries its own typeface.
+//
+// This silently not running once already shipped a broken site. The relative
+// path resolves fine from file:// and from the dev server, so the font looked
+// correct locally while the deployed page had no /fonts/ to fetch. Hence the
+// assertion below rather than a warning.
+const FONT_URL_RE = /url\(["']?\.\.\/fonts\/([^"')]+)["']?\)/g;
+
+function embedFonts(css) {
+  const out = css.replace(FONT_URL_RE, (whole, file) => {
+    const f = path.join(ROOT, 'fonts', file);
+    if (!fs.existsSync(f)) {
+      throw new Error(`@font-face references fonts/${file}, which does not exist`);
+    }
+    const buf = fs.readFileSync(f);
+    const mime = file.endsWith('.woff2') ? 'font/woff2' : 'font/woff';
+    console.log(`  embedded font ${file} (${(buf.length / 1024).toFixed(1)} kB)`);
+    return `url("data:${mime};base64,${buf.toString('base64')}")`;
+  });
+
+  // A stray relative url() here means the deployed page would try to fetch it
+  // from the origin and get whatever the 404 handler returns.
+  if (/url\(["']?\.{0,2}\/?fonts\//.test(out)) {
+    throw new Error('a font url() survived inlining; the deployed page would 404 on it');
+  }
+  return out;
+}
+
 /* ----------------------------------------------------------------- build  */
 function build() {
   collect(ENTRY);
@@ -178,7 +208,7 @@ function build() {
     'https://github.com/cyberbalsa/spacescience */\n';
   let js = banner + `(function () {\n"use strict";\n\n${chunks.join('\n')}\n})();`;
   js = embedMusic(js);
-  const css = fs.readFileSync(path.join(SRC, 'style.css'), 'utf8').trim();
+  const css = embedFonts(fs.readFileSync(path.join(SRC, 'style.css'), 'utf8').trim());
 
   const LINK_RE = /[ \t]*<link[^>]*href="style\.css"[^>]*>\n?/;
   const SCRIPT_RE = /[ \t]*<script[^>]*src="main\.js"[^>]*><\/script>\n?/;
