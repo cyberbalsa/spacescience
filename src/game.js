@@ -9,7 +9,7 @@ import { clamp, vcol, hexLabel } from './util.js';
 import { RNG, setSeed, random, randInt, choose, getRngState, setRngState } from './rng.js';
 import { burst, sparks, popText, clearFX, blast, bump } from './fx.js';
 import { Snd } from './audio.js';
-import { onEvent as say, CTX, resetCommentary } from './commentary.js';
+import { onEvent as say, CTX, resetCommentary, observe } from './commentary.js';
 import { track, scoreBucket, waveBucket, resetPlaytimeMarks } from './analytics.js';
 import { STATS, recordRun, noteWaveCleared, flushStats } from './stats.js';
 import { writeSave, readSave, clearSave } from './save.js';
@@ -903,6 +903,7 @@ function updateCommentaryContext() {
   CTX.entropy = entropy();
   CTX.hyper = G.hyper;
   CTX.dud = G.dud = !edge.has(G.cur);
+  observe();
 }
 
 function waveClear() {

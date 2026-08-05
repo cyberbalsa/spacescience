@@ -128,14 +128,24 @@ export function chromeLogo(g, txt, cx, y, size, t) {
 // keeps it looking smooth while bounding the cache at a few hundred sprites.
 const CHAR_W = 17, SCROLL_SPEED = 3.1, HUE_STEPS = 32;
 
-// The scroller only owns the sliver below the playfield frame. WAVE has to be
-// small enough that a glyph at the crest still fits inside it, and the wave is
-// enveloped so characters enter and leave the screen flat: the undulation is a
-// function of screen x, so without the taper a character rides up as it exits
-// and the message appears to tail off the top.
-const BAND = 24;          // half-height of the strip the text may occupy
-const WAVE = 7;           // peak vertical travel, before the envelope
-const RIPPLE = 2.5;
+// The scroller owns only the sliver below the playfield frame, so its vertical
+// budget is derived rather than guessed. The trap here is shadowBlur: the ink
+// of a glyph extends GLOW pixels past its own box in every direction, so the
+// real half-height is half the font size PLUS the glow. Sizing against the
+// glyph alone put the crest 10px below the canvas.
+//
+// The wave is also enveloped so characters enter and leave the screen flat:
+// the undulation is a function of screen x, so without the taper a character
+// rides up as it exits and the message appears to tail off the top.
+const GLYPH = 22;                       // font size
+const GLOW = 6;                         // shadowBlur, and therefore ink bleed
+const WAVE = 5;                         // peak vertical travel before envelope
+const RIPPLE = 1.5;
+const INK = GLYPH / 2 + GLOW;           // true half-height of a drawn glyph
+const SWING = WAVE + RIPPLE;
+// Sit as low as possible while the lowest crest still clears the canvas.
+export const SCROLL_Y = Math.floor(VH - INK - SWING - 2);
+const BAND = Math.ceil(INK + SWING + 2); // clip tall enough not to cut the glow
 const glyphCache = new Map();
 
 // The text is generated on the fly, so the scroller keeps a rolling buffer:
@@ -150,7 +160,7 @@ function glyph(ch, hueBucket) {
   const hit = glyphCache.get(key);
   if (hit) return hit;
   const hue = hueBucket * (360 / HUE_STEPS);
-  const size = 26, pad = 22;
+  const size = GLYPH, pad = GLOW + 12;
   const cv = document.createElement('canvas');
   cv.width = CHAR_W + pad * 2;
   cv.height = size + pad * 2;
@@ -159,7 +169,7 @@ function glyph(ch, hueBucket) {
   g.textAlign = 'left';
   g.textBaseline = 'middle';
   g.shadowColor = `hsl(${hue},100%,60%)`;
-  g.shadowBlur = 12;
+  g.shadowBlur = GLOW;
   g.fillStyle = 'rgba(0,0,0,.9)';
   g.fillText(ch, pad + 2, pad + size / 2 + 2);
   g.fillStyle = `hsl(${hue},100%,78%)`;
@@ -172,9 +182,18 @@ function glyph(ch, hueBucket) {
 export function drawScroller(g, t, y) {
   // Retire characters that have scrolled off the left, then top the buffer up.
   while (scrollX <= -CHAR_W && buf.length) { buf = buf.slice(1); scrollX += CHAR_W; }
+  // Only pull more text when the commentator actually has news. When it does
+  // not, the buffer drains, the last message scrolls off, and the strip goes
+  // quiet until something happens.
   let guard = 0;
-  while (buf.length < SCREEN_CHARS + Math.ceil(-Math.min(scrollX, 0) / CHAR_W) && guard++ < 40) {
-    buf += nextPhrase();
+  while (buf.length < SCREEN_CHARS && guard++ < 20) {
+    const next = nextPhrase();
+    if (!next) break;
+    buf += next;
+  }
+  if (!buf.length) {
+    scrollX = VW;              // park off-screen right, ready for the next line
+    return;
   }
 
   g.save();

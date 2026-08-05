@@ -7,7 +7,7 @@ import { rnd, rint, vcol, hexLabel } from './util.js';
 import { drawBubble, hexPath } from './sprites.js';
 import { FX, drawFX } from './fx.js';
 import { drawStars, drawCopper, drawWire, plasmaCanvas } from './backdrop.js';
-import { neon, chromeLogo, drawScroller } from './text.js';
+import { neon, chromeLogo, drawScroller, SCROLL_Y } from './text.js';
 import { G, cellX, cellY, rowShift, edgeValues, boardValues, entropy, trace, resumeAvailable } from './game.js';
 import { keys } from './input.js';
 import { Snd } from './audio.js';
@@ -636,7 +636,7 @@ export function renderWorld(t) {
   lap('overlays');
   w.restore();
 
-  drawScroller(w, t, 696);
+  drawScroller(w, t, SCROLL_Y);
   lap('scroller');
 
   if (FX.flash > 0.01) {

@@ -1,4 +1,4 @@
-import { hexLabel, pick, rint } from './util.js';
+import { hexLabel, pick } from './util.js';
 
 // The scroller is the game's colour commentator. Rather than a fixed greetz
 // blob it reacts to the last few things the player did, falling back to
@@ -15,9 +15,8 @@ export const CTX = {
   entropy: 0, hyper: false, dud: false
 };
 
-const pending = [];        // event lines, drained before any ambient chatter
+const pending = [];        // the only source of scroller text
 const PENDING_MAX = 8;
-let sinceEvent = 0;
 
 function push(line) {
   if (pending.length >= PENDING_MAX) return;
@@ -84,60 +83,72 @@ export function onEvent(kind, d = {}) {
   }
 }
 
-/* ----------------------------------------------------------------- ambient */
-const RULES = [
-  'EVERY ORB IS AN EVEN BYTE. TOUCHING PAIRS COLLAPSE INTO THE NEXT TIER',
-  'DOUBLING KEEPS A BYTE EVEN, SO 0A CLIMBS 14 28 50 A0 - ITS OWN LADDER',
-  'AN 0A WILL NEVER PAIR WITH AN 08. DIFFERENT CHAINS, NO DEAL',
-  'TWO 80s OVERFLOW TO FF AND BURN OFF - THAT IS THE ONLY WAY OUT',
-  'THE CANNON ONLY LOADS WHAT IS SITTING ON AN EXPOSED EDGE',
-  'HOLD SHIFT WHEN CHARGED TO BURN A WARP ORB',
-  'KNOCK A CLUSTER OFF THE CEILING AND IT RAINS POINTS'
-];
+/* -------------------------------------------------------- observations */
+// The scroller used to fill dead air with rules and greetz on a loop, which
+// meant it was always saying something and therefore never worth reading.
+// Board facts are now EDGE triggered: a line fires the moment a condition
+// becomes true and stays quiet until it changes back. Between events the
+// scroller has nothing to say, and says nothing.
+const seen = {
+  danger: false, dud: false, buried: false, oneEdge: false,
+  entropy: false, lowBuffer: false, wave: 0
+};
 
-const FILLER = [
-  'ONE HUNDRED PERCENT CLIENT SIDE - NO CDN, NO TRACKERS, NO NONSENSE',
-  'CODE, GFX AND SOUNDCHIP HAND ROLLED',
-  'GREETINGS TO EVERY CODER STILL PUSHING PIXELS FOR THE LOVE OF IT',
-  'THE SCROLLER NEVER STOPS, IT ONLY WRAPS'
-];
+export function observe() {
+  const danger = CTX.rowsToSpare <= 2 && CTX.orbs > 0;
+  if (danger !== seen.danger) {
+    seen.danger = danger;
+    if (danger) push('WATCH THE RED LINE - ONE MORE ROW AND IT IS OVER');
+  }
 
-function ambient() {
-  const bag = [];
-  if (CTX.rowsToSpare <= 2 && CTX.orbs) bag.push('WATCH THE RED LINE. ONE MORE ROW AND IT IS OVER', 'THAT STACK IS GETTING AWFULLY CLOSE');
-  if (CTX.orbs > 0) bag.push(`${CTX.orbs} ORBS STILL ON THE LATTICE`);
-  if (CTX.topByte >= 8) bag.push(`TOP BYTE THIS RUN: ${hexLabel(CTX.topByte)}`);
-  if (CTX.buried > 0) bag.push(`${CTX.buried} VALUE${CTX.buried > 1 ? 'S' : ''} BURIED WITH NOTHING ON AN EDGE`);
-  if (CTX.edgeKinds === 1) bag.push('ONLY ONE VALUE LEFT ON AN EDGE. THE CANNON HAS NO CHOICE');
-  if (CTX.bufferIn <= 2) bag.push(`INBOUND BUFFER IN ${CTX.bufferIn}`);
-  if (CTX.wave >= 3) bag.push(`WAVE ${CTX.wave} AND STILL STANDING`);
-  if (CTX.dud) bag.push('THE CHAMBER IS HOLDING A DUD. NOTHING ON AN EDGE MATCHES IT');
-  if (CTX.hyper) bag.push('HYPER MODE. NO NOTES, JUST RESPECT', 'THE BUFFER IS RELENTLESS NOW');
-  else if (CTX.entropy > 0.6) bag.push(
-    `ENTROPY AT ${Math.round(CTX.entropy * 100)} PERCENT. THE CANNON IS GETTING CREATIVE`,
-    'WATCH FOR CHAINS THAT CANNOT MERGE WITH ANYTHING OUT THERE');
+  const dud = !!CTX.dud;
+  if (dud !== seen.dud) {
+    seen.dud = dud;
+    if (dud) push('THAT ONE MATCHES NOTHING ON AN EDGE. PLACE IT WHERE IT WILL PAIR LATER');
+  }
 
-  // Keep some cracktro filler in the mix so it still reads like a scroller.
-  if (!bag.length || Math.random() < 0.45) bag.push(pick(RULES), pick(FILLER));
-  return pick(bag);
+  const buried = CTX.buried > 0;
+  if (buried !== seen.buried) {
+    seen.buried = buried;
+    if (buried) push(`${CTX.buried} VALUE${CTX.buried > 1 ? 'S' : ''} BURIED WITH NOTHING ON AN EDGE`);
+  }
+
+  const oneEdge = CTX.edgeKinds === 1 && CTX.orbs > 0;
+  if (oneEdge !== seen.oneEdge) {
+    seen.oneEdge = oneEdge;
+    if (oneEdge) push('ONLY ONE VALUE LEFT ON AN EDGE. THE CANNON HAS NO CHOICE');
+  }
+
+  const hot = CTX.entropy > 0.6;
+  if (hot !== seen.entropy) {
+    seen.entropy = hot;
+    if (hot) push(`ENTROPY AT ${Math.round(CTX.entropy * 100)} PERCENT - WATCH FOR CHAINS ` +
+      'THAT CANNOT MERGE WITH ANYTHING OUT THERE');
+  }
+
+  const low = CTX.bufferIn <= 2;
+  if (low !== seen.lowBuffer) {
+    seen.lowBuffer = low;
+    if (low) push(`INBOUND BUFFER IN ${CTX.bufferIn}`);
+  }
+
+  if (CTX.wave !== seen.wave) {
+    seen.wave = CTX.wave;
+    if (CTX.wave >= 3) push(`WAVE ${CTX.wave} AND STILL STANDING`);
+  }
 }
 
 /* ---------------------------------------------------------------- the feed */
+// Returns null when there is genuinely nothing to report, which is the signal
+// for the scroller to stop rather than invent something.
 export function nextPhrase() {
-  let line;
-  if (pending.length) {
-    line = pending.shift();
-    sinceEvent = 0;
-  } else {
-    line = ambient();
-    sinceEvent++;
-    // After a long quiet stretch, drop in a title card the way a real intro would.
-    if (sinceEvent % 7 === 0) line = 'S P A C E   S C I E N C E';
-  }
-  return line + '   ...   ';
+  if (!pending.length) return null;
+  return pending.shift() + '   ...   ';
 }
+
+export function hasSomethingToSay() { return pending.length > 0; }
 
 export function resetCommentary() {
   pending.length = 0;
-  sinceEvent = rint(3);
+  for (const k of Object.keys(seen)) seen[k] = (k === 'wave' ? 0 : false);
 }

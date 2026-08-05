@@ -51,7 +51,10 @@ Every cell is an **even** byte, and it wears its hex value: `02 04 08 10 20 40 8
   wildcard that becomes whatever it lands against.
 
 The scroller along the bottom is a commentator, not a fixed greetz blob — it
-reacts to your last few moves and to the state of the board.
+reacts to your last few moves and to the state of the board. It only runs when
+it has something new to say: board conditions are edge-triggered, so a line
+fires when something *becomes* true and the strip goes quiet in between rather
+than looping filler at you.
 
 ### Reading the cells
 
