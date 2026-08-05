@@ -20,10 +20,17 @@ export const PROF = {
 const WARMUP = 12;
 let mark = 0;
 
+// Hash flags are standalone tokens separated with URL-fragment punctuation:
+//   #bench
+//   #seed-example&profile
+// A seed such as #seed-bench is one seed token, not a benchmark request.
+export function hashFlag(name) {
+  return location.hash.slice(1).split(/[&,+;]/).some(token => token === name);
+}
+
 export function profInit() {
-  const h = location.hash;
-  PROF.bench = h.includes('bench');
-  PROF.on = PROF.bench || h.includes('profile');
+  PROF.bench = hashFlag('bench');
+  PROF.on = PROF.bench || hashFlag('profile');
 }
 
 export function begin() { if (PROF.on) mark = performance.now(); }

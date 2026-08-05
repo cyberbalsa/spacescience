@@ -39,6 +39,10 @@ export function onEvent(kind, d = {}) {
       ]));
       break;
     case 'burn':
+      if (d.super) {
+        push(`SUPER FF!  WARP DROPPED A ${d.super}-ORB SUPPORT PATH TO THE CEILING`);
+        break;
+      }
       if (d.blast > 3) { push(`FF DETONATION!  ${d.blast} CELLS WENT UP WITH IT`); break; }
       push(pick([
         'FF!!!  EIGHT BITS SET AND GONE OFF THE BOARD',
@@ -47,6 +51,10 @@ export function onEvent(kind, d = {}) {
       ]));
       break;
     case 'drop':
+      if (d.super) {
+        push(`SUPER FF ROUTE!  ${d.n} SUPPORT ORB${d.n > 1 ? 'S' : ''} DROPPED`);
+        break;
+      }
       push(d.n >= 6
         ? `AVALANCHE!  ${d.n} ORBS KNOCKED CLEAN OFF THE CEILING`
         : `${d.n} ORB${d.n > 1 ? 'S' : ''} CUT LOOSE AND DROPPED`);

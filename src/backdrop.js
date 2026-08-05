@@ -6,10 +6,10 @@ const stars = [];
 for (let i = 0; i < 340; i++)
   stars.push({ x: rnd(2, -1), y: rnd(2, -1), z: rnd(1, .02), px: 0, py: 0, pz: 0 });
 
-export function drawStars(g) {
+export function drawStars(g, frameScale = 1) {
   g.globalCompositeOperation = 'lighter';
   for (const s of stars) {
-    s.z -= 0.0042;
+    s.z -= 0.0042 * frameScale;
     if (s.z <= 0.02) { s.x = rnd(2, -1); s.y = rnd(2, -1); s.z = 1; s.pz = 0; }
     const k = 0.42 / s.z;
     const x = VW / 2 + s.x * VW * k * 0.55;

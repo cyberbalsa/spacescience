@@ -72,6 +72,7 @@ export const KONAMI = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown',
 export const HYPER_SHOTS = 2;    // the wall comes down every other shot
 export const HYPER_ROWS = 2;     // and it starts deeper
 export const HYPER_MULT = 4;     // the only compensation you get
+export const MAX_BUFFER = 32;     // drops can postpone, never bank forever
 
 /* ------------------------------------------------------------ wave curve */
 export const BASE_ROWS = 5;
@@ -99,4 +100,3 @@ export const REPO = 'github.com/cyberbalsa';
 // marker, which does not start with a digit, so it reads as "dev".
 const STAMP = '@@VERSION@@';
 export const VERSION = /^\d/.test(STAMP) ? STAMP : 'dev';
-

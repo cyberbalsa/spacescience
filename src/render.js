@@ -3,13 +3,16 @@ import {
   FRAME, LEFT_PANEL, RIGHT_PANEL, LAUNCH, TIERS, FULL, TITLE, SITE, REPO, VERSION
 } from './config.js';
 import { cvs, ctx, wc, w, VIEW, SCREEN } from './canvas.js';
-import { rnd, rint, vcol, hexLabel } from './util.js';
+import { clamp, rnd, rint, vcol, hexLabel } from './util.js';
 import { drawBubble, hexPath } from './sprites.js';
 import { FX, drawFX } from './fx.js';
 import { drawStars, drawCopper, drawWire, plasmaCanvas } from './backdrop.js';
 import { neon, chromeLogo, drawScroller, SCROLL_Y } from './text.js';
-import { G, cellX, cellY, rowShift, edgeValues, boardValues, entropy, trace, resumeAvailable } from './game.js';
-import { keys } from './input.js';
+import {
+  G, cellX, cellY, rowShift, trace,
+  edgeValues, boardValues, entropy, resumeAvailable
+} from './game.js';
+import { keys, HELP_PAGE_COUNT } from './input.js';
 import { Snd } from './audio.js';
 import { begin, lap } from './profile.js';
 import { RNG } from './rng.js';
@@ -19,6 +22,10 @@ import { STATS, formatDuration } from './stats.js';
 // Panel borders are large blurred strokes and never change, so each distinct
 // panel is rasterised once and blitted after that.
 const panelCache = new Map();
+
+// Panel titles are baked into their cached canvases, so a font-ready refresh
+// has to invalidate these as well as the ordinary text/sprite caches.
+export function clearPanelCache() { panelCache.clear(); }
 
 // `chromeOnly` skips the tinted backing plate. The HUD panels are drawn before
 // their contents so they want it, but the playfield frame goes on top of the
@@ -77,11 +84,12 @@ function drawPanelChrome(g, x, y, wd, h, hue, title, chromeOnly) {
 }
 
 /* --------------------------------------------------------------- playfield */
-// The empty-cell lattice never changes, so it is one blit instead of ~190
-// stroked hexagon paths every frame.
-let meshSprite = null;
-function hexMesh() {
-  if (meshSprite) return meshSprite;
+// The empty-cell lattice has two parity variants. An inbound row flips the
+// board's parity, so cache one blit for each instead of rebuilding ~190 paths.
+const meshSprites = [null, null];
+function hexMesh(parity) {
+  parity &= 1;
+  if (meshSprites[parity]) return meshSprites[parity];
   const cv = document.createElement('canvas');
   cv.width = FRAME.w;
   cv.height = FRAME.h;
@@ -94,7 +102,7 @@ function hexMesh() {
     const y = PF_TOP + R + r * ROWH;
     if (y - R > FRAME.y + FRAME.h) break;
     for (let c = 0; c < COLS; c++) {
-      const x = PF_X + R + ((r & 1) ? R : 0) + c * 2 * R;
+      const x = PF_X + R + (((r + parity) & 1) ? R : 0) + c * 2 * R;
       if (x + R > PF_X + PF_W + 1) break;
       g.beginPath();
       for (let i = 0; i < 6; i++) {
@@ -105,11 +113,11 @@ function hexMesh() {
       g.closePath(); g.stroke();
     }
   }
-  meshSprite = cv;
+  meshSprites[parity] = cv;
   return cv;
 }
 
-function drawPlayfield(g, t) {
+function drawPlayfield(g, t, frameScale) {
   const sy = rowShift();
   g.save();
   g.beginPath(); g.rect(FRAME.x, FRAME.y, FRAME.w, FRAME.h); g.clip();
@@ -117,7 +125,7 @@ function drawPlayfield(g, t) {
   g.fillStyle = 'rgba(2,0,14,0.68)';
   g.fillRect(FRAME.x, FRAME.y, FRAME.w, FRAME.h);
 
-  g.drawImage(hexMesh(), FRAME.x, FRAME.y);
+  g.drawImage(hexMesh(G.parity), FRAME.x, FRAME.y);
 
   // danger line
   const dz = 0.55 + Math.sin(t * 6) * 0.35;
@@ -138,11 +146,13 @@ function drawPlayfield(g, t) {
 
   // aim guide
   if (G.state === 'play' && !G.ball) {
-    const pts = trace();
+    const guide = trace();
+    const pts = guide.pts;
+    const warp = G.warpReady && keys.shift;
     g.save();
     g.setLineDash([7, 10]);
     g.lineDashOffset = -t * 90;
-    g.strokeStyle = G.warpReady && keys.shift ? 'rgba(255,255,255,.8)' : 'rgba(120,255,240,.55)';
+    g.strokeStyle = warp ? 'rgba(255,255,255,.8)' : 'rgba(120,255,240,.55)';
     g.lineWidth = 2;
     g.shadowColor = '#0ff';
     g.shadowBlur = 10;
@@ -151,12 +161,24 @@ function drawPlayfield(g, t) {
     for (let i = 1; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1]);
     g.stroke();
     g.restore();
-    const e = pts[pts.length - 1];
-    g.strokeStyle = 'rgba(255,255,255,.6)';
-    g.lineWidth = 1.5;
-    g.beginPath();
-    g.arc(e[0], e[1], R * (0.85 + Math.sin(t * 8) * .12), 0, TAU);
-    g.stroke();
+    if (guide.cell) {
+      const [r, c] = guide.cell;
+      const x = cellX(r, c), y = cellY(r) + sy;
+      const pulse = 1 + Math.sin(t * 7) * .035;
+      g.save();
+      g.globalCompositeOperation = 'lighter';
+      drawBubble(g, x, y, warp ? -1 : G.cur, pulse, .30);
+      g.globalCompositeOperation = 'source-over';
+      g.setLineDash([5, 4]);
+      g.lineDashOffset = t * 32;
+      g.strokeStyle = warp ? 'rgba(255,255,255,.85)' : 'rgba(140,255,245,.78)';
+      g.lineWidth = 1.5;
+      g.shadowColor = warp ? '#fff' : '#0ff';
+      g.shadowBlur = 8;
+      hexPath(g, x, y, R * (1.08 + Math.sin(t * 7) * .025));
+      g.stroke();
+      g.restore();
+    }
   }
 
   // orbs
@@ -167,7 +189,7 @@ function drawPlayfield(g, t) {
     for (let c = 0; c < row.length; c++) {
       const b = row[c];
       if (!b) continue;
-      if (b.pop > 1) b.pop += (1 - b.pop) * 0.16;
+      if (b.pop > 1) b.pop += (1 - b.pop) * (1 - Math.pow(0.84, frameScale));
       const x = cellX(r, c);
       const bob = Math.sin(t * 2 + r * 0.5 + c * 0.35) * 1.1;
       drawBubble(g, x, y + bob, b.v, b.pop);
@@ -257,7 +279,7 @@ function drawLauncher(g, t) {
 const SPECTRUM = new Float32Array(26);
 const PEAKS = new Float32Array(26);
 
-function drawLeftPanel(g, t) {
+function drawLeftPanel(g, t, frameScale) {
   const { x: LX, y: LY, w: LW, h: LH } = LEFT_PANEL;
   panel(g, LX, LY, LW, LH, G.hyper ? 350 : 300, G.hyper ? 'STATUS //HYPER' : 'STATUS');
 
@@ -290,7 +312,7 @@ function drawLeftPanel(g, t) {
 
   // descent meter
   y += 16;
-  const left = G.shotsPerRow - (G.shots % G.shotsPerRow);
+  const left = G.bufferLeft;
   const danger = left <= 2;
   neon(g, 'INBOUND BUFFER ' + left, LX + 22, y, 14,
     danger ? '#ff4060' : '#ffb347', { track: 2, glow: danger ? 14 : 6 });
@@ -301,7 +323,7 @@ function drawLeftPanel(g, t) {
   mg.addColorStop(0, '#ffb347');
   mg.addColorStop(1, '#ff2d55');
   g.fillStyle = mg;
-  g.fillRect(LX + 22, y, mw * (1 - left / G.shotsPerRow), 10);
+  g.fillRect(LX + 22, y, mw * clamp(1 - left / G.shotsPerRow, 0, 1), 10);
   g.strokeStyle = 'rgba(255,255,255,.3)';
   g.strokeRect(LX + 22.5, y + .5, mw - 1, 9);
 
@@ -338,7 +360,7 @@ function drawLeftPanel(g, t) {
       : (0.10 + 0.10 * Math.sin(t * 6 + i * 0.7) * Math.sin(t * 2.3 + i * 0.21));
     // Decay caps make the bars fall smoothly instead of strobing.
     if (level >= PEAKS[i]) PEAKS[i] = level;
-    else PEAKS[i] = Math.max(level, PEAKS[i] - 0.02);
+    else PEAKS[i] = Math.max(level, PEAKS[i] - 0.02 * frameScale);
     const h = PEAKS[i] * 46 + 3;
     const hue = 200 + i * 5;
     const bx = LX + 22 + i * (bw + 2);
@@ -356,7 +378,7 @@ function drawLeftPanel(g, t) {
     'CLICK / SPACE    FIRE',
     'SHIFT+FIRE       WARP ORB',
     'M / S   MUSIC / SFX',
-    'P PAUSE      R RESTART'
+    'P PAUSE   R RESTART   H HELP'
   ]) {
     neon(g, s, LX + 22, cy, 12, '#7a8cc9', { track: 1.2, glow: 4 });
     cy += 18;
@@ -481,9 +503,182 @@ function drawFunFact(g, t) {
   }
 }
 
+/* ------------------------------------------------------------ field manual */
+const HELP_PAGES = [
+  {
+    title: 'MISSION // FIRE CONTROL',
+    sections: [
+      ['OBJECTIVE', [
+        'CLEAR EVERY ORB TO FINISH THE WAVE. A DEEPER, FASTER BOARD FOLLOWS.',
+        'CELLS LEAVE THROUGH FF BURNS OR WHEN THEIR CEILING SUPPORT IS CUT.'
+      ]],
+      ['BASIC SHOOTING', [
+        'MOVE THE MOUSE OR HOLD LEFT / RIGHT TO AIM THE CANNON.',
+        'CLICK OR PRESS SPACE TO FIRE THE VALUE SHOWN IN CHAMBER.',
+        'THE NEXT QUEUE IS VISIBLE IN THE MAGAZINE. PLAN MORE THAN ONE SHOT.',
+        'BANK SHOTS OFF SIDE WALLS; THE DOTTED LINE SHOWS THE PHYSICAL ROUTE.',
+        'THE GHOST HEX MARKS THE EXACT LATTICE CELL WHERE THE SHOT WILL SNAP.'
+      ]],
+      ['STICKING', [
+        'A SHOT STICKS TO THE CEILING OR THE FIRST ORB IT REACHES.',
+        'MATCH EXACT HEX VALUES. CLOSE COLOURS ARE NOT NECESSARILY A MATCH.'
+      ]]
+    ]
+  },
+  {
+    title: 'PAIRWISE // ODD GROUPS // CASCADES',
+    sections: [
+      ['PAIRWISE FUSION', [
+        'TWO TOUCHING EQUAL VALUES BECOME ONE ORB WORTH TWICE AS MUCH.',
+        'FOUR 02s MAKE TWO 04s. THEY DO NOT JUMP STRAIGHT TO ONE 08.'
+      ]],
+      ['ODD GROUPS', [
+        'AN ODD CELL IS ABSORBED INSTEAD OF BEING LEFT STRANDED.',
+        'THREE 04s MAKE ONE 08; THE SPARE 04 VALUE IS LOST.',
+        'FIVE MATCHES MAKE TWO DOUBLED ORBS, AND SO ON.'
+      ]],
+      ['CASCADES', [
+        'A NEW RESULT CAN FUSE AGAIN WITH A MATCH THAT WAS ALREADY ON THE BOARD.',
+        'SIBLINGS CREATED TOGETHER DO NOT EAT EACH OTHER IN THAT SAME PASS.',
+        'DEEPER CASCADES SCORE MORE. SURVIVORS TRY TO KEEP CEILING SUPPORT.'
+      ]]
+    ]
+  },
+  {
+    title: 'BYTE LADDERS // FF // DROPS',
+    sections: [
+      ['BYTE LADDERS', [
+        'THE MAIN CLIMB IS 02 04 08 10 20 40 80. VALUES ARE HEXADECIMAL.',
+        'OTHER EVEN ROOTS HAVE THEIR OWN LADDERS: 0A 14 28 50 A0, FOR EXAMPLE.',
+        'ONLY EXACT VALUES FUSE. 0A NEVER MATCHES 08.'
+      ]],
+      ['FF OVERFLOW', [
+        'WHEN DOUBLING NO LONGER FITS IN ONE BYTE, THE RESULT SATURATES TO FF.',
+        '80 + 80 IS THE CLASSIC OVERFLOW. FF NEVER RESTS ON THE LATTICE.',
+        'AN FF BURN ALSO DETONATES EVERY ORB TOUCHING IT, ONE TILE OUT.',
+        'A WARP-CAUSED OVERFLOW BECOMES SUPER FF INSTEAD.',
+        'SUPER FF DROPS THE SHORTEST OCCUPIED SUPPORT PATH TO THE CEILING.',
+        'ANY BRANCHES LEFT UNSUPPORTED BY THAT CUT FALL TOO.'
+      ]],
+      ['CUTTING SUPPORT', [
+        'ANY CLUSTER NO LONGER CONNECTED TO THE CEILING FALLS FOR DROP POINTS.',
+        'FUSIONS AND HOLES IN A NEW INBOUND ROW CAN BOTH CUT A BRANCH LOOSE.'
+      ]]
+    ]
+  },
+  {
+    title: 'REACHABLE AMMO // ENTROPY // DUDS',
+    sections: [
+      ['REACHABLE EDGES', [
+        'THE CANNON LOADS VALUES BESIDE OPEN SPACE REACHABLE FROM THE LAUNCHER.',
+        'A SEALED INTERNAL HOLE IS NOT A FIRING LANE AND DOES NOT COUNT.',
+        'RINGED MAGAZINE VALUES ARE LOADABLE; BURIED VALUES ARE NOT.'
+      ]],
+      ['ENTROPY', [
+        'WAVE 1 GUARANTEES REACHABLE AMMO. LATER WAVES RELAX THAT PROMISE.',
+        'ENTROPY ADDS STRANGE LAYOUTS, EXTRA BYTE LADDERS AND LONE HIGH VALUES.',
+        'WATCH THE ENTROPY METER AS THE BOARD BECOMES LESS PREDICTABLE.'
+      ]],
+      ['DUDS', [
+        'A DUD HAS NO EXACT MATCH ON ANY CURRENTLY REACHABLE EDGE.',
+        'IT STILL STICKS. A SECOND DUD OF THE SAME VALUE CAN FORM A NEW PAIR.',
+        'THE RED CHAMBER WARNING TELLS YOU BEFORE YOU COMMIT THE SHOT.'
+      ]]
+    ]
+  },
+  {
+    title: 'INBOUND BUFFER // DROP TIME // WARP',
+    sections: [
+      ['INBOUND BUFFER', [
+        'EVERY LAUNCH USES ONE INBOUND SHOT. AT ZERO, A FRESH ROW IS DUE.',
+        'THE ROW ARRIVES AFTER THAT SHOT RESOLVES; LET IT CROSS RED AND THE RUN ENDS.',
+        'THE HUD SHOWS THE FULL COUNTDOWN, EVEN WHEN IT EXCEEDS THE NORMAL INTERVAL.'
+      ]],
+      ['DROP BUYS TIME', [
+        'DROP xN ADDS 2N INBOUND SHOTS, UP TO THE 32-SHOT CAP.',
+        'A DROP CAN CANCEL A DUE ROW; THE COUNT MAY EXCEED THE NORMAL INTERVAL.'
+      ]],
+      ['WARP ORB', [
+        'FUSIONS CHARGE WARP. WHEN READY, HOLD SHIFT WHILE FIRING.',
+        'THE WILDCARD BECOMES THE VALUE IT LANDS AGAINST, THEN RESOLVES NORMALLY.',
+        'WARP IS CONSUMED ON USE AND STILL COUNTS AS AN INBOUND SHOT.'
+      ]]
+    ]
+  },
+  {
+    title: 'SCORING // CONTROLS // ACCESS // SEEDS',
+    sections: [
+      ['SCORING', [
+        'FUSION: NEW BYTE x8 x PAIRS x CASCADE DEPTH.',
+        'FF: 4096 x PAIRS x DEPTH. DROP: FALLEN BYTE VALUE x4.',
+        'WAVE CLEAR: 5000 x WAVE. HYPER MULTIPLIES ALL OF THESE x4.'
+      ]],
+      ['CONTROLS', [
+        'MOUSE OR LEFT / RIGHT AIM  |  CLICK OR SPACE FIRE  |  SHIFT+FIRE WARP',
+        'P OR ESC PAUSE  |  R RESTART  |  M MUSIC  |  S SFX  |  H HELP',
+        'TOUCH: DRAG TO AIM, LIFT TO FIRE; KEEP A SECOND TOUCH DOWN FOR WARP.'
+      ]],
+      ['ACCESSIBILITY', [
+        'EACH ORB REPEATS ITS VALUE AS HEX DIGITS, HUE, BRIGHTNESS AND TEXTURE.',
+        'THE DIGITS ARE FINAL; TEXTURES AND LUMINANCE REMAIN USEFUL WITHOUT COLOUR.'
+      ]],
+      ['SHAREABLE SEEDS', [
+        'THE SEED IS PRINTED AT LOWER RIGHT. REPLAY WITH #seed-NUMBER OR #seed-WORD.',
+        'A SEED REPEATS GAME DECISIONS; STARS, PARTICLES AND GLITCH NOISE MAY DIFFER.'
+      ]]
+    ]
+  }
+];
+
+function drawHelp(g) {
+  const bx = 120, by = 66, bw = 1040, bh = 620;
+  const pageIndex = clamp(G.helpPage | 0, 0, HELP_PAGE_COUNT - 1);
+  const page = HELP_PAGES[pageIndex];
+
+  g.save();
+  g.fillStyle = 'rgba(0,0,8,.88)';
+  g.fillRect(0, 0, VW, VH);
+  g.fillStyle = 'rgba(2,0,18,.97)';
+  g.fillRect(bx, by, bw, bh);
+  panel(g, bx, by, bw, bh, 195, 'FIELD MANUAL');
+
+  neon(g, page.title, VW / 2, by + 62, 22, '#7fffd4',
+    { align: 'center', track: 3, glow: 14 });
+  g.strokeStyle = 'rgba(120,220,255,.25)';
+  g.lineWidth = 1;
+  g.beginPath();
+  g.moveTo(bx + 36, by + 84);
+  g.lineTo(bx + bw - 36, by + 84);
+  g.stroke();
+
+  let y = by + 118;
+  for (const [heading, lines] of page.sections) {
+    neon(g, heading, bx + 48, y, 14, '#ffe66d', { track: 2, glow: 7 });
+    y += 27;
+    for (const line of lines) {
+      neon(g, line, bx + 48, y, 13, '#d8e6ff', { track: .7, glow: 4 });
+      y += 20;
+    }
+    y += 13;
+  }
+
+  const fy = by + bh - 68;
+  g.strokeStyle = 'rgba(120,220,255,.25)';
+  g.beginPath();
+  g.moveTo(bx + 36, fy);
+  g.lineTo(bx + bw - 36, fy);
+  g.stroke();
+  neon(g, `LEFT / RIGHT : CHANGE PAGE     PAGE ${pageIndex + 1} / ${HELP_PAGE_COUNT}`,
+    VW / 2, fy + 28, 13, '#89b4ff', { align: 'center', track: 1.5, glow: 6 });
+  neon(g, 'H OR ESC : CLOSE', VW / 2, fy + 50, 13, '#fff',
+    { align: 'center', track: 2, glow: 9 });
+  g.restore();
+}
+
 /* --------------------------------------------------------------- overlays */
 function drawOverlays(g, t) {
-  if (G.state === 'title') {
+  const state = G.state === 'help' ? G.helpState : G.state;
+  if (state === 'title') {
     g.fillStyle = 'rgba(2,0,14,.78)';
     g.fillRect(FRAME.x, FRAME.y, FRAME.w, FRAME.h);
 
@@ -517,8 +712,11 @@ function drawOverlays(g, t) {
       VW / 2, 596, 20, '#fff', { align: 'center', track: 3, glow: 24 });
     g.globalAlpha = 1;
     if (held) {
-      neon(g, `RUN IN PROGRESS - WAVE ${held.level}, ${held.score} PTS, ` +
-        `${held.cells} CELLS   (R FOR A NEW RUN)`, VW / 2, 616, 11, '#5cffb0',
+      const heldLine = held.clearPending
+        ? `WAVE ${held.level} READY - ${held.score} PTS   (R FOR A NEW RUN)`
+        : `RUN IN PROGRESS - WAVE ${held.level}, ${held.score} PTS, ` +
+          `${held.cells} CELLS   (R FOR A NEW RUN)`;
+      neon(g, heldLine, VW / 2, 616, 11, '#5cffb0',
         { align: 'center', track: 1.5, glow: 6 });
     }
     neon(g, 'HI-SCORE  ' + String(G.best).padStart(8, '0'), VW / 2, 634, 15, '#7fffd4',
@@ -531,7 +729,7 @@ function drawOverlays(g, t) {
     return;
   }
 
-  if (G.state === 'clear') {
+  if (state === 'clear') {
     const k = Math.min(1, G.clearAnim * 2);
     g.fillStyle = `rgba(0,14,10,${.72 * k})`;
     g.fillRect(FRAME.x, FRAME.y, FRAME.w, FRAME.h);
@@ -558,7 +756,7 @@ function drawOverlays(g, t) {
     return;
   }
 
-  if (G.state === 'over') {
+  if (state === 'over') {
     g.fillStyle = `rgba(20,0,10,${.75 * G.over})`;
     g.fillRect(FRAME.x, FRAME.y, FRAME.w, FRAME.h);
 
@@ -595,7 +793,7 @@ function drawOverlays(g, t) {
     return;
   }
 
-  if (G.state === 'pause') {
+  if (state === 'pause') {
     g.fillStyle = 'rgba(0,0,20,.7)';
     g.fillRect(FRAME.x, FRAME.y, FRAME.w, FRAME.h);
     neon(g, 'PAUSED', VW / 2, 340, 44, '#0ff', { align: 'center', track: 6, glow: 26 });
@@ -604,7 +802,14 @@ function drawOverlays(g, t) {
 }
 
 /* ------------------------------------------------------------ world frame */
+let lastRenderT = null;
+
 export function renderWorld(t) {
+  // A value of 1 reproduces the original 60 Hz tuning. T advances on the
+  // fixed simulation clock, so duplicate 120/144 Hz renders get a scale of 0
+  // and slower displays advance by the corresponding number of sim frames.
+  const frameScale = lastRenderT === null ? 1 : clamp((t - lastRenderT) * 60, 0, 5);
+  lastRenderT = t;
   begin();
   w.setTransform(1, 0, 0, 1, 0, 0);
   w.globalAlpha = 1;
@@ -617,7 +822,7 @@ export function renderWorld(t) {
   w.globalAlpha = 1;
   lap('plasma');
 
-  drawStars(w);
+  drawStars(w, frameScale);
   lap('stars');
   drawCopper(w, t, 0, 60);
   lap('copper');
@@ -626,11 +831,11 @@ export function renderWorld(t) {
   if (FX.shake > 0.2) w.translate(rnd(FX.shake, -FX.shake), rnd(FX.shake, -FX.shake) * .6);
   chromeLogo(w, TITLE, VW / 2, 33, 40, t);
   lap('logo');
-  drawPlayfield(w, t);
+  drawPlayfield(w, t, frameScale);
   lap('playfield');
   drawLauncher(w, t);
   lap('launcher');
-  drawLeftPanel(w, t);
+  drawLeftPanel(w, t, frameScale);
   lap('hud.left');
   drawRightPanel(w, t);
   lap('hud.right');
@@ -639,7 +844,7 @@ export function renderWorld(t) {
   lap('overlays');
   w.restore();
 
-  drawScroller(w, t, SCROLL_Y);
+  drawScroller(w, t, SCROLL_Y, frameScale);
   lap('scroller');
 
   if (FX.flash > 0.01) {
@@ -656,6 +861,13 @@ export function renderWorld(t) {
     }
   }
   lap('glitch.slices');
+
+  // Draw the manual last so shake, flashes, glitches and the scroller remain
+  // behind a stable, readable modal.
+  if (G.state === 'help') {
+    drawHelp(w);
+    lap('help');
+  }
 }
 
 /* ------------------------------------------------------------- compositor */

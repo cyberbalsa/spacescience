@@ -68,8 +68,14 @@ function weave(g, cx, cy, rad, pat, light) {
       }
       break;
     case 7:                                            // FF: concentric rings
-      for (let k = 0.3; k < 1; k += 0.22) hexPath(g, cx, cy, rad * k);
-      break;
+      // hexPath begins a fresh path, so stroke each ring before starting the
+      // next one instead of accidentally retaining only the final ring.
+      for (let k = 0.3; k < 1; k += 0.22) {
+        hexPath(g, cx, cy, rad * k);
+        g.stroke();
+      }
+      g.restore();
+      return;
   }
   g.stroke();
   g.restore();
@@ -203,7 +209,8 @@ export function clearSprites() { sprCache.clear(); }
 
 export function drawBubble(g, x, y, v, sc = 1, alpha = 1) {
   const sp = bubbleSprite(v), s = sp.width * sc;
-  g.globalAlpha = alpha;
+  const prevAlpha = g.globalAlpha;
+  g.globalAlpha = prevAlpha * alpha;
   g.drawImage(sp, x - s / 2, y - s / 2, s, s);
-  g.globalAlpha = 1;
+  g.globalAlpha = prevAlpha;
 }
