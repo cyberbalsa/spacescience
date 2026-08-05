@@ -1,0 +1,47 @@
+/* The Ultimate Oldschool PC Font Pack v2.2 by VileR, CC BY-SA 4.0.
+   https://int10h.org/oldschool-pc-fonts/  -- full licence in fonts/.
+   build.mjs rewrites the url() below into an embedded base64 payload. */
+@font-face {
+  font-family: "VGA437";
+  src: url("../fonts/Web437_IBM_VGA_8x16.woff") format("woff");
+  font-weight: normal;
+  font-style: normal;
+  font-display: block;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #000;
+  overflow: hidden;
+}
+
+body {
+  cursor: crosshair;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+canvas {
+  display: block;
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+
+#boot {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  color: #0ff;
+  font: 400 16px "VGA437", "Courier New", monospace;
+  letter-spacing: .25em;
+  text-align: center;
+  text-shadow: 0 0 12px #0ff;
+}

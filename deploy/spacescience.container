@@ -1,0 +1,39 @@
+[Unit]
+Description=SPACE SCIENCE static origin
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image=docker.io/library/nginx:1.30.4-alpine
+ContainerName=spacescience
+# Rendered by deploy.sh from $SS_NETWORK: the podman network the tunnel
+# connector is attached to, which is host-specific.
+Network=@@NETWORK@@
+AutoUpdate=registry
+NoNewPrivileges=true
+ReadOnly=true
+DropCapability=all
+User=1000:1000
+UserNS=keep-id:uid=1000,gid=1000
+Volume=%h/apps/spacescience/nginx.conf:/etc/nginx/nginx.conf:ro,z
+Volume=%h/apps/spacescience/site:/srv/site:ro,z
+# Read-only root, so everything nginx writes -- pid, temp paths -- lives here.
+Tmpfs=/tmp:rw,nosuid,nodev,exec,size=32m
+PublishPort=127.0.0.1:18082:8080
+HealthCmd=wget -q -O /dev/null http://127.0.0.1:8080/healthz
+HealthInterval=15s
+HealthTimeout=5s
+HealthRetries=5
+Exec=nginx -g "daemon off;"
+
+[Service]
+Restart=always
+RestartSec=5s
+TimeoutStartSec=60s
+TimeoutStopSec=20s
+MemoryMax=192M
+CPUQuota=100%
+TasksMax=64
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,21 @@
+{
+  "name": "space-science",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Hexadecimal bubble-fusion cracktro: Frozen Bubble physics, 2048 merge math, byte overflow.",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node tools/serve.mjs",
+    "test": "node build.mjs && node tools/smoke.mjs 500",
+    "shots": "node build.mjs && node tools/smoke.mjs 80 --shot title && node tools/smoke.mjs 80 --shot play",
+    "deploy": "./deploy/deploy.sh"
+  },
+  "author": "Balsa",
+  "license": "GPL-2.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cyberbalsa/spacescience.git"
+  },
+  "homepage": "https://spacescience.tech"
+}

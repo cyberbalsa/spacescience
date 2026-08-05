@@ -1,0 +1,10 @@
+# Build output. Regenerate with `npm run build`; it is ~10 MB because the
+# soundtrack is inlined, and committing it on every deploy would bloat history.
+dist/
+
+node_modules/
+*.log
+
+# Tunnel ingress maps every hostname to an internal service name. Kept on the
+# server (apps/tunnel-config-v5-before-spacescience.json), not published here.
+deploy/cloudflare-tunnel-config*.json
